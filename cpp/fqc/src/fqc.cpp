@@ -111,7 +111,7 @@ int main(int argc, char **argv){
 
   const size_t kmer_size = 8;
   const size_t kmer_lookup_len = 1 << (3*(kmer_size + 1));
-  const size_t kmer_mask = 1 << (3*kmer_size - 1);
+  const size_t kmer_mask = 1 << (3*kmer_size) - 1;
 
   // A 3^(K+1) vector to count all possible kmers
   vector<size_t> kmer_count(kmer_lookup_len, 0);
