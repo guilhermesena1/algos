@@ -26,20 +26,23 @@
 
 #include <string>
 #include <iostream>
+
 using std::string;
 using std::runtime_error;
 using std::cerr;
+using std::endl;
 using std::vector;
 
-string int_to_seq(size_t v){
+static string
+int_to_seq(size_t v) {
   string ans;
-  while(v > 0){
-    switch (v & 7){
-      case 0: ans.push_back('A'); break;
-      case 1: ans.push_back('C'); break;
-      case 2: ans.push_back('T'); break;
-      case 3: ans.push_back('G'); break;
-      case 7: ans.push_back('N'); break;
+  while (v > 0) {
+    switch (v & 7) {
+    case 0: ans.push_back('A'); break;
+    case 1: ans.push_back('C'); break;
+    case 2: ans.push_back('T'); break;
+    case 3: ans.push_back('G'); break;
+    case 7: ans.push_back('N'); break;
     }
     v >>= 3;
   }
@@ -71,7 +74,7 @@ int main(int argc, char **argv){
   if (mmap_data == MAP_FAILED)
     throw runtime_error("failed to mmap fastq file: " + filename);
 
-  cerr << "Fastq size: " << st.st_size /(1024*1024)<< "Mb \n";
+  cerr << "Fastq size: " << st.st_size /(1024*1024)<< "Mb" << endl;
   char *curr = static_cast<char*>(mmap_data);
   char *first = curr;
   char *last = curr + st.st_size;
@@ -79,12 +82,12 @@ int main(int argc, char **argv){
   ////////////////////////////////////////////////////////////////////////////
   // STATS
   ////////////////////////////////////////////////////////////////////////////
-  
+
   // This can be a very large number, the maximum illumina read size. Does not
   // affect memory very much
-  const size_t num_bases = 1000; 
+  const size_t num_bases = 1000;
   const double ascii_to_quality = 33.0;
-  short num_chars = 8; // A = 000, C = 001, T = 010, G = 011, N = 111
+  const size_t num_chars = 8; // A = 000, C = 001, T = 010, G = 011, N = 111
 
   /***********ALL****************/
   vector<size_t> total_char (num_chars, 0);
@@ -94,7 +97,7 @@ int main(int argc, char **argv){
   /***********BASE****************/
 
   // counts the number of bases in every read position
-  vector<vector<size_t>> base_count(num_chars, vector<size_t>(num_bases,0)); 
+  vector<vector<size_t>> base_count(num_chars, vector<size_t>(num_bases,0));
 
   // Sum of base qualities in every read position
   vector<vector<size_t>> base_quality(num_chars, vector<size_t>(num_bases,0));
@@ -102,26 +105,26 @@ int main(int argc, char **argv){
   /***********READ***************/
 
   // Distribution of read lengths
-  vector<size_t> read_length_freq(num_bases,0); 
+  vector<size_t> read_length_freq(num_bases,0);
 
   /**********KMER****************/
 
   const size_t kmer_size = 8;
-  const size_t kmer_lookup_len = 1<< (3*(kmer_size + 1));
-  const size_t kmer_mask = 1 << (3*kmer_size) - 1;
+  const size_t kmer_lookup_len = 1 << (3*(kmer_size + 1));
+  const size_t kmer_mask = 1 << (3*kmer_size - 1);
 
-  // A 3^(K+1) vector to count all possible kmers 
+  // A 3^(K+1) vector to count all possible kmers
   vector<size_t> kmer_count(kmer_lookup_len, 0);
 
   ////////////////////////////////////////////////////////////////////////////
-  // PASS THROUGH FILE 
+  // PASS THROUGH FILE
   ////////////////////////////////////////////////////////////////////////////
   short line = 0,kmer_base = 0, base = 0, base_ind = 0;
   size_t nreads = 1;
-  char c; 
+  char c;
   char buff[num_bases]; // I'll store the sequence to know the quality afterwards
 
-  // Hash of kmer 
+  // Hash of kmer
   size_t cur_kmer = 0;
 
   cerr << "Started analysis of " << filename << "\n";
@@ -136,7 +139,7 @@ int main(int argc, char **argv){
 
         // Transforms base into 3-bit index
         // Bits 2,3 and 4 of charcters A,C,G,T and N are distinct so we can just
-        // use them to get the index instead of doing if-elses. 
+        // use them to get the index instead of doing if-elses.
         base_ind = (c >> 1) & 7;
 
         // Increments count of base
@@ -165,8 +168,8 @@ int main(int argc, char **argv){
         base_ind = (buff[base] >> 1) & 7;
         base_quality[base_ind][base++] += *curr;
       }
-    
-    // Start new line 
+
+    // Start new line
     } else {
       if(line == 0) nreads++;
 
@@ -196,21 +199,21 @@ int main(int argc, char **argv){
   }
 
   cerr << "Average A quality: ";
-  for(size_t i = 0; i < 60; ++i)  
+  for(size_t i = 0; i < 60; ++i)
     cerr << base_quality[0][i] / static_cast<double>(base_count[0][i]) - ascii_to_quality << " ";
   cerr << "\n\n";
 
   cerr << "Average A frequency: ";
-  for(size_t i = 0; i < 60; ++i)  
-    cerr << base_count[0][i] / static_cast<double>(base_count[0][i] + base_count[1][i] + base_count[2][i] + base_count[3][i] + base_count[7][i]) << " ";
+  for(size_t i = 0; i < 60; ++i) {
+    const double denom = (base_count[0][i] + base_count[1][i] +
+                          base_count[2][i] + base_count[3][i] +
+                          base_count[7][i]);
+    cerr << base_count[0][i]/denom << " ";
+  }
   cerr << "\n";
-
 
   cerr << "Average gc % " << 100.0 * (total_char[1] + total_char[3]) / static_cast<double>(total_bases) << "\n";
   cerr << "Average n % " << 100.0 * total_char[7] / static_cast<double>(total_bases) << "\n";
   cerr << "Average length " << total_bases / static_cast<double>(nreads) << "\n";
   cerr << "Elapsed time: " << (clock() - begin) / CLOCKS_PER_SEC << " seconds\n";
 }
-
-
-
