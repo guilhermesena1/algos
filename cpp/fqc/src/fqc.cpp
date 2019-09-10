@@ -1,3 +1,19 @@
+/* fqc: what this program does
+*
+* Copyright (C) 2019 Guilherme De Sena Brandine
+*
+* Authors: Guilherme De Sena Brandine
+*
+* This program is free software: you can redistribute it and/or
+* modify it under the terms of the GNU General Public License as
+* published by the Free Software Foundation, either version 3 of the
+* License, or (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful, but
+* WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+* General Public License for more details.
+*/
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -30,9 +46,11 @@ string int_to_seq(size_t v){
   return ans;
 }
 
-int main(){
+int main(int argc, char **argv){
   clock_t begin = clock();
-  const string filename = "SRR1853178_pass_2.fastq";
+
+  // Hardcoded until I add option parser
+  const string filename = string(argv[1]);
 
   ////////////////////////////////////////////////////////////////////////////
   // MEMORY MAP
@@ -61,7 +79,10 @@ int main(){
   ////////////////////////////////////////////////////////////////////////////
   // STATS
   ////////////////////////////////////////////////////////////////////////////
-  const size_t num_bases = 1000;
+  
+  // This can be a very large number, the maximum illumina read size. Does not
+  // affect memory very much
+  const size_t num_bases = 1000; 
   const double ascii_to_quality = 33.0;
   short num_chars = 8; // A = 000, C = 001, T = 010, G = 011, N = 111
 
@@ -71,16 +92,25 @@ int main(){
   size_t total_bases = 0;
 
   /***********BASE****************/
-  vector<vector<size_t>> base_count(num_chars, vector<size_t>(num_bases,0)); // avg per base gc
-  vector<vector<size_t>> base_quality(num_chars, vector<size_t>(num_bases,0)); // avg per base gc
+
+  // counts the number of bases in every read position
+  vector<vector<size_t>> base_count(num_chars, vector<size_t>(num_bases,0)); 
+
+  // Sum of base qualities in every read position
+  vector<vector<size_t>> base_quality(num_chars, vector<size_t>(num_bases,0));
 
   /***********READ***************/
-  vector<size_t> read_length_freq(num_bases,0); //read length frequency
+
+  // Distribution of read lengths
+  vector<size_t> read_length_freq(num_bases,0); 
 
   /**********KMER****************/
+
   const size_t kmer_size = 8;
   const size_t kmer_lookup_len = 1<< (3*(kmer_size + 1));
   const size_t kmer_mask = 1 << (3*kmer_size) - 1;
+
+  // A 3^(K+1) vector to count all possible kmers 
   vector<size_t> kmer_count(kmer_lookup_len, 0);
 
   ////////////////////////////////////////////////////////////////////////////
@@ -105,19 +135,24 @@ int main(){
         c = *curr;
 
         // Transforms base into 3-bit index
+        // Bits 2,3 and 4 of charcters A,C,G,T and N are distinct so we can just
+        // use them to get the index instead of doing if-elses. 
         base_ind = (c >> 1) & 7;
 
         // Increments count of base
         base_count[base_ind][base]++;
 
-        // Need this to know what base the quality is associated to
+        // Need this to know what base the quality is associated to, therefore
+        // we will store each read in memory
         buff[base] = c;
         cur_kmer = ((cur_kmer << 3) | base_ind);
 
         base++;
+
+        // If we already read >= k bases, increment the k-mer count
         if(kmer_base == kmer_size){
-          kmer_count[cur_kmer]++;
           cur_kmer &= kmer_mask;
+          kmer_count[cur_kmer]++;
         } else {
           kmer_base++;
         }
@@ -125,12 +160,16 @@ int main(){
 
       // quality read
       else if(line == 3){
+
+        // Same trick as above
         base_ind = (buff[base] >> 1) & 7;
         base_quality[base_ind][base++] += *curr;
       }
     
     // Start new line 
     } else {
+      if(line == 0) nreads++;
+
       // count read length frequency
       if(line == 1)
         read_length_freq[base]++;
@@ -139,17 +178,14 @@ int main(){
       base = 0;
       cur_kmer = 0;
       kmer_base = 0;
-      nreads++;
     }
   }
 
   // Deallocates memory
   munmap(mmap_data, st.st_size);
 
-  nreads /= 4;
   cerr << "Finished reading " << nreads << " reads\n";
   cerr << "Summarizing totals...\n";
-
   for(size_t j = 0; j < num_chars; ++j){
     for(size_t i = 0; i < num_bases; ++i){
       total_char[j] += base_count[j][i];
@@ -175,5 +211,6 @@ int main(){
   cerr << "Average length " << total_bases / static_cast<double>(nreads) << "\n";
   cerr << "Elapsed time: " << (clock() - begin) / CLOCKS_PER_SEC << " seconds\n";
 }
+
 
 
