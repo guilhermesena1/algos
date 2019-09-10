@@ -1,12 +1,12 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
+
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <vector>
 #include <ctime>
-
 
 #include <string>
 #include <iostream>
@@ -15,9 +15,24 @@ using std::runtime_error;
 using std::cerr;
 using std::vector;
 
+string int_to_seq(size_t v){
+  string ans;
+  while(v > 0){
+    switch (v & 7){
+      case 0: ans.push_back('A'); break;
+      case 1: ans.push_back('C'); break;
+      case 2: ans.push_back('T'); break;
+      case 3: ans.push_back('G'); break;
+      case 7: ans.push_back('N'); break;
+    }
+    v >>= 3;
+  }
+  return ans;
+}
+
 int main(){
   clock_t begin = clock();
-  const string filename = "test.fq";
+  const string filename = "SRR1853178_pass_2.fastq";
 
   ////////////////////////////////////////////////////////////////////////////
   // MEMORY MAP
@@ -59,39 +74,53 @@ int main(){
   vector<vector<size_t>> base_count(num_chars, vector<size_t>(num_bases,0)); // avg per base gc
   vector<vector<size_t>> base_quality(num_chars, vector<size_t>(num_bases,0)); // avg per base gc
 
-
   /***********READ***************/
   vector<size_t> read_length_freq(num_bases,0); //read length frequency
+
+  /**********KMER****************/
+  const size_t kmer_size = 8;
+  const size_t kmer_lookup_len = 1<< (3*(kmer_size + 1));
+  const size_t kmer_mask = 1 << (3*kmer_size) - 1;
+  vector<size_t> kmer_count(kmer_lookup_len, 0);
 
   ////////////////////////////////////////////////////////////////////////////
   // PASS THROUGH FILE 
   ////////////////////////////////////////////////////////////////////////////
-
-  short line = 0,base = 0, base_ind = 0;
+  short line = 0,kmer_base = 0, base = 0, base_ind = 0;
   size_t nreads = 1;
-  char c, buff[num_bases];
+  char c; 
+  char buff[num_bases]; // I'll store the sequence to know the quality afterwards
 
-  // to log progress
-  size_t max_block = 20, cur_block = 1;
+  // Hash of kmer 
+  size_t cur_kmer = 0;
 
   cerr << "Started analysis of " << filename << "\n";
 
   // read character by character
   for(curr = first; curr < last - 1; ++curr) {
-    // Log progress
-    if(curr - first >= (last - first)*cur_block/max_block){
-      cerr << "Approximately " << 100*cur_block/max_block <<
-              "% complete for " << filename << "\n";
-      cur_block++;
-    }
-
     // Process line
     if (*curr !=  '\n'){
      // base read
       if(line == 1){
-        base_ind = (*(curr) >> 1) & 7;
+        c = *curr;
+
+        // Transforms base into 3-bit index
+        base_ind = (c >> 1) & 7;
+
+        // Increments count of base
         base_count[base_ind][base]++;
-        buff[base++] = *curr;
+
+        // Need this to know what base the quality is associated to
+        buff[base] = c;
+        cur_kmer = ((cur_kmer << 3) | base_ind);
+
+        base++;
+        if(kmer_base == kmer_size){
+          kmer_count[cur_kmer]++;
+          cur_kmer &= kmer_mask;
+        } else {
+          kmer_base++;
+        }
       }
 
       // quality read
@@ -108,16 +137,19 @@ int main(){
 
       line = (line+1) & 3;
       base = 0;
+      cur_kmer = 0;
+      kmer_base = 0;
       nreads++;
     }
   }
 
+  // Deallocates memory
   munmap(mmap_data, st.st_size);
 
+  nreads /= 4;
   cerr << "Finished reading " << nreads << " reads\n";
   cerr << "Summarizing totals...\n";
 
-  nreads /= 4;
   for(size_t j = 0; j < num_chars; ++j){
     for(size_t i = 0; i < num_bases; ++i){
       total_char[j] += base_count[j][i];
@@ -127,15 +159,20 @@ int main(){
     }
   }
 
-  cerr << "Average A quality on read 2: ";
+  cerr << "Average A quality: ";
   for(size_t i = 0; i < 60; ++i)  
     cerr << base_quality[0][i] / static_cast<double>(base_count[0][i]) - ascii_to_quality << " ";
+  cerr << "\n\n";
+
+  cerr << "Average A frequency: ";
+  for(size_t i = 0; i < 60; ++i)  
+    cerr << base_count[0][i] / static_cast<double>(base_count[0][i] + base_count[1][i] + base_count[2][i] + base_count[3][i] + base_count[7][i]) << " ";
   cerr << "\n";
+
 
   cerr << "Average gc % " << 100.0 * (total_char[1] + total_char[3]) / static_cast<double>(total_bases) << "\n";
   cerr << "Average n % " << 100.0 * total_char[7] / static_cast<double>(total_bases) << "\n";
   cerr << "Average length " << total_bases / static_cast<double>(nreads) << "\n";
-
   cerr << "Elapsed time: " << (clock() - begin) / CLOCKS_PER_SEC << " seconds\n";
 }
 
