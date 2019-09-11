@@ -49,6 +49,7 @@ using std::cout;
 using std::unordered_map;
 using std::pair;
 using std::make_pair;
+using std::ifstream;
 
 // converts 64 bit integer to a sequence string by reading 3 bits at a time and
 // converting back to ACTGN
@@ -73,20 +74,23 @@ int_to_seq(size_t v, const size_t &kmer_size) {
 }
 
 int main(int argc, const char **argv) {
-  clock_t begin = clock();
+  clock_t begin = clock();  // register ellapsed time
   /****************** COMMAND LINE OPTIONS ********************/
   string filename;  // fastq file
-  string outfile;
+  string outfile;  // optional filename to save
+
+  // file containing contaminants to be checked for
+	string contaminants_file = "misc/contaminants.tsv";
+  // Length of k-mers to count. Grows memory exponentially so it is bound to 10
   size_t kmer_size = 8;
-  bool VERBOSE = false;
+  bool VERBOSE = false;  // print more run info
 
   OptionParser opt_parse(strip_path(argv[0]),
                          "Quality control metrics for fastq files",
                          "<fastq-file>");
 
-  // Length of k-mers to count. Grows memory exponentially so it is bound to 10
   opt_parse.add_opt("kmer", 'k',
-                    "k-mer size (default = 8)", false, kmer_size);
+                    "k-mer size (default = 8, max = 10)", false, kmer_size);
 
   opt_parse.add_opt("outfile", 'o',
                     "filename to save results (default = stdout)",
@@ -120,9 +124,14 @@ int main(int argc, const char **argv) {
     return EXIT_SUCCESS;
   }
 
+  if (kmer_size < 2) {
+    cerr << "K-mer size should be smaller than 2\n";
+    cerr << opt_parse.help_message() << endl;
+    return EXIT_SUCCESS;
+  }
   filename = leftover_args.front();
-  /****************** END COMMAND LINE OPTIONS *****************/
 
+  /****************** END COMMAND LINE OPTIONS *****************/
 
   /****************** MEMORY MAP ******************************/
   // open the file
@@ -149,6 +158,8 @@ int main(int argc, const char **argv) {
   // This can be a very large number, the maximum illumina read size. Does not
   // affect memory very much
   const size_t kNumBases = 1000;
+
+  // Value to subtract quality characters to get the actual quality value
   const double ascii_to_quality = 33.0;
   const size_t num_chars = 8;  // A = 000, C = 001, T = 010, G = 011, N = 111
 
@@ -162,7 +173,7 @@ int main(int argc, const char **argv) {
   double seq_duplication_level;
   size_t min_read_length = 0;
   size_t max_read_length = 0;
-  size_t exp_kmer_obs;  // Num reads * (length - k + 1) / 4^k assuming iid
+  size_t exp_kmer_obs;  // Num reads * (length - k + 1) / 4^k assuming iid bases
 
   /*********** PER BASE METRICS ****************/
 
@@ -179,10 +190,10 @@ int main(int argc, const char **argv) {
   vector<size_t> read_length_freq(kNumBases, 0);
 
   /********** KMER FREQUENCY ****************/
-
+  // mask to get only the first 3*k bits of the sliding window
   const size_t kmer_mask = (1ll << (3*kmer_size)) - 1;
 
-  // A 3^(K+1) vector to count all possible kmers
+  // A 3^K + 1 vector to count all possible kmers
   vector<size_t> kmer_count(kmer_mask + 1, 0);
 
   /********** PASS THROUGH FILE *************/
@@ -202,7 +213,6 @@ int main(int argc, const char **argv) {
     cerr << "Started analysis of " << filename << "\n";
     cerr << "K-mer size: " << kmer_size << "\n";
   }
-
 
   // read character by character
   for (char *curr = first; curr < last;) {
@@ -236,7 +246,6 @@ int main(int argc, const char **argv) {
       if (read_pos >= kmer_size - 1)
         kmer_count[cur_kmer & kmer_mask]++;
 
-      read_rk_hash = read_rk_hash*8 + base_ind;
       read_pos++;
     }
     ++curr;  // skips \n from line 2
@@ -295,7 +304,7 @@ int main(int argc, const char **argv) {
     }
   }
 
-  // Averages
+   // Averages
   avg_read_length = total_bases / nreads;
   gc_content = 100.0 * (num_bases_per_pos[1] + num_bases_per_pos[3])
              / static_cast<double>(total_bases);
@@ -306,6 +315,44 @@ int main(int argc, const char **argv) {
   exp_kmer_obs = static_cast<size_t>(nreads * (avg_read_length - kmer_size + 1)
                / static_cast<double>( (1ll << (2*kmer_size))));
 
+ // Store frequent kmers
+  vector<pair<size_t, size_t>> kmer_freq_ordered;
+  for (size_t i = 0; i < kmer_mask; ++i)
+    if (kmer_count[i] > 5 * exp_kmer_obs)
+      kmer_freq_ordered.push_back(make_pair(i, kmer_count[i]));
+
+  // sort by frequency in decreasing order
+  sort(kmer_freq_ordered.begin(), kmer_freq_ordered.end(),
+      [](auto &a, auto &b){ return a.second > b.second; });
+
+	// Find contaminants all k mers are among the frequent ones
+  vector<string> contaminants_seq;
+  vector<string> contaminants_name;
+	if (contaminants_file != "") {
+		ifstream cont_is (contaminants_file);
+		string cont_name, cont_seq;
+		while (cont_is >> cont_name >> cont_seq) {
+			size_t cur_kmer = 0;
+			bool is_valid = true;
+			char c;
+			for (size_t i = 0; (i < cont_seq.size()) && is_valid; ++i) {
+				c = cont_seq[i];
+				int16_t base_ind = (c >> 1) & 7; 
+				cur_kmer = ((cur_kmer << 3) | base_ind);
+				if (i >= kmer_size - 1){
+					cur_kmer = (cur_kmer & kmer_mask);
+					if(kmer_count[cur_kmer] <= 3*exp_kmer_obs)
+						is_valid = false;
+					
+				}
+			}
+			if (is_valid){
+				contaminants_seq.push_back(cont_seq);
+				contaminants_name.push_back(cont_name);
+			}
+		}
+		cont_is.close();
+	}
   /************** WRITE TO OUTPUT *********************************/
   // define output
   ofstream of;
@@ -362,16 +409,13 @@ int main(int argc, const char **argv) {
   os << "kmer_size\t" << kmer_size << "\n";
   os << "kmer_expected_frequency\t " << exp_kmer_obs << "\n";
 
-  // Store frequent kmers
-  vector<pair<size_t, size_t>> kmer_freq_ordered;
-  for (size_t i = 0; i < kmer_mask; ++i)
-    if (kmer_count[i] > 5 * exp_kmer_obs)
-      kmer_freq_ordered.push_back(make_pair(i, kmer_count[i]));
-
-  // sort by frequency in decreasing order
-  sort(kmer_freq_ordered.begin(), kmer_freq_ordered.end(),
-      [](auto &a, auto &b){ return a.second > b.second; });
-
+	if (contaminants_seq.size() == 0) {
+		os << "No contaminants found\n";
+	} else {
+		os << "Found " << contaminants_seq.size() << " contaminants:\n";
+		for (size_t i = 0; i < contaminants_seq.size(); ++i)
+			os << contaminants_seq[i] << "\t" << contaminants_name[i] << "\n";
+	}
   os << "Overrepresented k-mers (> 5 stdevs above poisson): \n";
   for (auto v : kmer_freq_ordered)
     os << int_to_seq(v.first, kmer_size) << "\t" << v.second  << "\n";
