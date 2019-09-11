@@ -7,5 +7,5 @@ make all
 
 Run an example as follows:
 ```
-./fqc test_small.fq
+./fqc -v -o summary.tsv test_small.fq
 ```

@@ -1,19 +1,9 @@
-## name of C++ compiler
-CXX = g++
+all:
+	@make -C src SRC_ROOT=${PWD} OPT=1
 
-## which C++ standard and warning level
-CXXFLAGS = -std=c++11 -Wall
+install:
+	@make -C src SRC_ROOT=${PWD} OPT=1 install
 
-## optimization
-CXXFLAGS += -O3
-
-## targets that may be installed as programs
-PROGRAMS = fqc
-
-## compilation pre-processor flags
-#CPPFLAGS =
-
-all: $(PROGRAMS)
-
-%: src/%.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(CPPFLAGS)
+clean:
+	@make -C src SRC_ROOT=${PWD} OPT=1 clean
+	rm -rf ${PWD}/bin
