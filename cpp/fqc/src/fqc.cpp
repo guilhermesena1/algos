@@ -34,10 +34,13 @@ using std::cerr;
 using std::endl;
 using std::vector;
 using std::reverse;
+
+// converts 64 bit integer to a sequence string by reading 3 bits at a time and
+// converting back to ACTGN
 static string
 int_to_seq(size_t v, const size_t &kmer_size) {
   string ans;
-  for(size_t i = 0; i < kmer_size; ++i) {
+  for (size_t i = 0; i < kmer_size; ++i) {
     switch (v & 7) {
       case 0: ans.push_back('A'); break;
       case 1: ans.push_back('C'); break;
@@ -47,14 +50,14 @@ int_to_seq(size_t v, const size_t &kmer_size) {
     }
     v >>= 3;
   }
-  if(v > 0)
+  if (v > 0)
     throw std::runtime_error("bad kmer");
 
-  reverse(ans.begin(),ans.end());
+  reverse(ans.begin(), ans.end());
   return ans;
 }
 
-int main(int argc, char **argv){
+int main(int argc, char **argv) {
   clock_t begin = clock();
 
   // Hardcoded until I add option parser
@@ -89,32 +92,38 @@ int main(int argc, char **argv){
 
   // This can be a very large number, the maximum illumina read size. Does not
   // affect memory very much
-  const size_t num_bases = 1000;
+  const size_t kNumBases = 1000;
   const double ascii_to_quality = 33.0;
-  const size_t num_chars = 8; // A = 000, C = 001, T = 010, G = 011, N = 111
+  const size_t num_chars = 8;  // A = 000, C = 001, T = 010, G = 011, N = 111
 
   /***********ALL****************/
-  vector<size_t> total_char (num_chars, 0);
-  vector<size_t> total_quality (num_chars, 0);
+  vector<size_t> total_char(num_chars, 0);
+  vector<size_t> total_quality(num_chars, 0);
   size_t total_bases = 0;
+  size_t avg_read_length;
+  double gc_content;
+  double n_content;
+  size_t min_read_length = 0;
+  size_t max_read_length = 0;
+  size_t exp_kmer_obs;
 
   /***********BASE****************/
 
   // counts the number of bases in every read position
-  vector<vector<size_t>> base_count(num_chars, vector<size_t>(num_bases,0));
+  vector<vector<size_t>> base_count(num_chars, vector<size_t>(kNumBases, 0));
 
   // Sum of base qualities in every read position
-  vector<vector<size_t>> base_quality(num_chars, vector<size_t>(num_bases,0));
+  vector<vector<size_t>> base_quality(num_chars, vector<size_t>(kNumBases, 0));
 
   /***********READ***************/
 
   // Distribution of read lengths
-  vector<size_t> read_length_freq(num_bases,0);
+  vector<size_t> read_length_freq(kNumBases, 0);
 
   /**********KMER****************/
 
   const size_t kmer_size = 8;
-  const size_t kmer_mask = (1 << (3*kmer_size)) - 1;
+  const size_t kmer_mask = (1ll << (3*kmer_size)) - 1;
 
   // A 3^(K+1) vector to count all possible kmers
   vector<size_t> kmer_count(kmer_mask + 1, 0);
@@ -123,25 +132,28 @@ int main(int argc, char **argv){
   // PASS THROUGH FILE
   ////////////////////////////////////////////////////////////////////////////
   size_t base_ind = 0;  // 0,1,2,3 or 7
-  size_t read_pos = 0; // which base we are at in the read
-  size_t nreads = 0; // nlines/4
-  char c; // to avoid accessing *curr multiple times
-  char buff[num_bases]; // I'll store the sequence to know the quality afterwards
-  size_t cur_kmer = 0; //kmer hash
+  size_t read_pos = 0;  // which base we are at in the read
+  size_t nreads = 0;  // nlines/4
+  char c;  // to avoid accessing *curr multiple times
+  char buff[kNumBases];  // temporarily store the sequence for quality check
+  size_t cur_kmer = 0;  // kmer hash
 
   cerr << "Started analysis of " << filename << "\n";
+  cerr << "K-mer size: " << kmer_size << "\n";
 
   // read character by character
-  for(char *curr = first; curr < last;) {
+  for (char *curr = first; curr < last;) {
     ++nreads;
 
+    // *************READ NAME LINE****************************/
     // fast forward first line
-    for(; *curr != '\n'; ++curr);
-    ++curr; //skips \n from line 1
+    for (; *curr != '\n'; ++curr) {}
 
-    //*************READ LINE*******************/
+    ++curr;  // skips \n from line 1
+
+    // *************NUCLEOTIDE LINE***************************/
     read_pos = 0;
-    for(; *curr != '\n'; ++curr){
+    for (; *curr != '\n'; ++curr) {
       c = *curr;
 
       // Transforms base into 3-bit index
@@ -158,69 +170,101 @@ int main(int argc, char **argv){
       cur_kmer = ((cur_kmer << 3) | base_ind);
 
       // If we already read >= k bases, increment the k-mer count
-      if(read_pos >= kmer_size - 1)
+      if (read_pos >= kmer_size - 1)
         kmer_count[cur_kmer & kmer_mask]++;
-      
+
       read_pos++;
-
     }
-    ++curr; // skips \n from line 2
+    ++curr;  // skips \n from line 2
 
+    // *************OTHER READ NAME LINE**********************/
     // count read length frequency
     read_length_freq[read_pos]++;
 
-    // fast forward third line 
-    for(; *curr != '\n'; ++curr);
-    ++curr; //skips \n from line 3
+    // fast forward third line
+    for (; *curr != '\n'; ++curr) {}
+    ++curr;  // skips \n from line 3
 
-    //*************QUALITY LINE*******************/
+    // *************QUALITY LINE******************************/
     read_pos = 0;
-    for(; (*curr != '\n') && (curr < last); ++curr){
+    for (; (*curr != '\n') && (curr < last); ++curr) {
       // Gets the base from buffer, finds index, adds quality value
       base_quality[(buff[read_pos] >> 1) & 7][read_pos] += *curr;
       read_pos++;
     }
-    ++curr; // skip \n or increments from last which is not a problem
-
+    ++curr;  // skip \n or increments from last which is not a problem
   }
 
   // Deallocates memory
   munmap(mmap_data, st.st_size);
 
   cerr << "Finished reading " << nreads << " reads\n";
-  cerr << "Summarizing totals...\n";
 
-  for(size_t j = 0; j < num_chars; ++j){
-    for(size_t i = 0; i < 60; ++i){
+  // Calculates summaries based on collected data
+  cerr << "Summarizing totals...\n";
+  for (size_t j = 0; j < num_chars; ++j) {
+    for (size_t i = 0; i < 60; ++i) {
       total_char[j] += base_count[j][i];
-      if(i == 1)
+      if (i == 1)
         total_quality[j] += base_quality[j][i];
       total_bases += base_count[j][i];
     }
   }
 
+  for (size_t i = 0; i < kNumBases; ++i) {
+    if (read_length_freq[i] > 0) {
+      // First nonzero is min read length
+      if (min_read_length == 0)
+        min_read_length = i;
+
+      // Last nonzero is max read length
+      max_read_length = i;
+    }
+  }
+
+  // Averages
+  avg_read_length = total_bases / static_cast<double>(nreads);
+  gc_content = 100.0 * (total_char[1] + total_char[3])
+             / static_cast<double>(total_bases);
+
+  n_content = 100.0 * total_char[7] / static_cast<double>(total_bases);
+
+  // Expected number of kmer observations from iid poisson
+  exp_kmer_obs = static_cast<size_t>(nreads * (avg_read_length - kmer_size + 1)
+               / static_cast<double>( (1ll << (2*kmer_size))));
+
+  // Outputs
+  cerr << "Number of reads: " << nreads << "\n";
+  cerr << "Average length " << avg_read_length << "\n";
+  cerr << "Minimum length " << min_read_length << "\n";
+  cerr << "Maximum length " << max_read_length << "\n";
+  cerr << "Expected number of " << kmer_size << "-mer observations: " <<
+    exp_kmer_obs << "\n";
+
   cerr << "Average A quality: ";
-  for(size_t i = 0; i < 60; ++i)
-    cerr << base_quality[0][i] / static_cast<double>(base_count[0][i]) - ascii_to_quality << " ";
+  for (size_t i = 0; i < 60; ++i) {
+    double qual =  base_quality[0][i] / static_cast<double>(base_count[0][i]);
+    qual -= ascii_to_quality;
+    cerr << qual << " ";
+  }
   cerr << "\n\n";
 
   cerr << "Average A frequency: ";
-  for(size_t i = 0; i < 60; ++i) {
+  for (size_t i = 0; i < 60; ++i) {
     const double denom = (base_count[0][i] + base_count[1][i] +
                           base_count[2][i] + base_count[3][i] +
                           base_count[7][i]);
     cerr << base_count[0][i]/denom << " ";
   }
   cerr << "\n";
+  cerr << "GC % " << gc_content << "\n";
+  cerr << "N % " << n_content << "\n";
 
-  cerr << "Number of reads: " << nreads << "\n";
-  cerr << "gc % " << 100.0 * (total_char[1] + total_char[3]) / static_cast<double>(total_bases) << "\n";
-  cerr << "n % " << 100.0 * total_char[7] / static_cast<double>(total_bases) << "\n";
-  cerr << "Average length " << total_bases / static_cast<double>(nreads) << "\n";
+  cerr << "Overrepresented k-mers (> 5 stdevs above poisson): \n";
+  for (size_t i = 0; i < kmer_mask; ++i)
+    if (kmer_count[i] > 5 * exp_kmer_obs) {
+        cerr << int_to_seq(i, kmer_size) << "\t" << kmer_count[i] << "\n";
+    }
 
-  for(size_t i = 0; i < kmer_mask; ++i)
-    if(kmer_count[i] > 100000000)
-      cerr << int_to_seq(i, kmer_size) << "\t" << kmer_count[i] << "\n";
-
-  cerr << "Elapsed time: " << (clock() - begin) / CLOCKS_PER_SEC << " seconds\n";
+  cerr << "Elapsed time: " << (clock() - begin)/CLOCKS_PER_SEC << " seconds\n";
 }
