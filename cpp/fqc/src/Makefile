@@ -8,7 +8,7 @@ INCLUDEDIRS = $(SMITHLAB_CPP)
 #LIBS = 
 INCLUDEARGS = $(addprefix -I, $(INCLUDEDIRS))
 CXX = g++
-CXXFLAGS = -O3 -Wall -Wextra -std=c++11
+CXXFLAGS = -O3 -Wall -Wextra -std=c++14
 
 all: $(PROGS)
 
