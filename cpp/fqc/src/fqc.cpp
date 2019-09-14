@@ -130,6 +130,10 @@ struct FastqStats {
   array<size_t, kNumChars * kNumBases> n_base_quality;
 
   /*********** PER QUALITY VALUE METRICS ****************/
+  // Counts of quality in each base position
+  array<size_t, kNumAsciiChars * kNumBases> position_quality_count;
+
+  // Counts of average quality (truncated) per sequence 
   array<size_t, kNumAsciiChars> quality_count;
 
   /*********** PER GC VALUE METRICS ****************/
@@ -393,9 +397,12 @@ FastqReader::operator >> (FastqStats &stats) {
     else
       stats.base_quality[(read_pos << 2) | buff[read_pos]] += *curr;
     cur_quality += *curr;
+
+    // We store for every position x quality value pair the count
+    stats.position_quality_count[(read_pos << 8) | *curr]++;
   }
-  // I feel like this is slow but idk how else to do it
-  stats.quality_count[cur_quality / read_pos]++;
+  // Slow but idk how else to do it
+  stats.quality_count [cur_quality / read_pos]++;
 
   // Successful read, increment number in stats
   stats.num_reads++;
@@ -437,18 +444,47 @@ FastqStats::write_per_base_quality(ostream &os) {
   // TODO(gui): Check what defines pass or fail
   // TODO(gui): Make median, deciles and quartiles
   os << ">>Per base sequence quality pass\n";
-  os << "#Base Mean\n";
+  os << "#Base\tMean\tMedian\tLower Quartile\tUpper Quartile" << 
+        "\t10th Percentile 90th Percentile\n";
+  size_t ldecile, lquartile, median, uquartile, udecile;
+  double mean,cur;
 
-  for (size_t i = 0; i < avg_read_length; ++i) {
-    double total =
-           base_quality[(i<< 2)] +
-           base_quality[(i<< 2) + 1] +
-           base_quality[(i<< 2) + 2] +
-           base_quality[(i<< 2) + 3] +
-           n_base_quality[i];
-    total = total/static_cast<double>(cumulative_read_length_freq[i]);
-    total = total - kBaseQuality;
-    os << i+1 << "\t" << total << "\n";
+  for (size_t i = 0; i < kNumBases; ++i) {
+    if (cumulative_read_length_freq[i] > 0) {
+      mean = 0;
+      size_t counts = 0;
+      size_t nreads = cumulative_read_length_freq[i];
+
+      // Number of counts I need to see to know in which bin each *ile is
+      double ldecile_thresh = 0.1*nreads;
+      double lquartile_thresh = 0.25*nreads;
+      double median_thresh = 0.5*nreads;
+      double uquartile_thresh = 0.75*nreads;
+      double udecile_thresh = 0.9*nreads;
+
+      // Iterate through quality values
+      for (size_t j = 0; j < kNumAsciiChars; ++j) {
+        cur = position_quality_count[(i << 8) + j];
+        if(counts < ldecile_thresh && counts + cur >= ldecile_thresh)
+          ldecile = j - kBaseQuality;
+        if(counts < lquartile_thresh && counts + cur >= lquartile_thresh)
+          lquartile = j - kBaseQuality;
+        if(counts < median_thresh && counts + cur >= median_thresh)
+          median = j - kBaseQuality;
+        if(counts < uquartile_thresh && counts + cur >= uquartile_thresh)
+          uquartile = j - kBaseQuality;
+        if(counts < udecile_thresh && counts + cur >= udecile_thresh)
+          udecile = j - kBaseQuality;
+        mean += cur*j;
+        counts += cur;
+      }
+
+      // Normalize mean 
+      mean = mean / nreads - kBaseQuality;
+      // Write distribution to new line
+      os << i + 1 << "\t" << mean << "\t" << median << "\t" << lquartile << "\t"
+         << uquartile << "\t" << ldecile << "\t" << udecile << "\n";
+    }
   }
   os << ">>END_MODULE\n";
 }
@@ -457,6 +493,7 @@ void
 FastqStats::write_per_sequence_quality(ostream &os) {
   os << ">>Per sequence quality scores\tpass\n";
   os << "#Quality\tCount\n";
+
   for (size_t i = kBaseQuality; i < kNumAsciiChars; ++i) {
     if (quality_count[i] > 0)
       os << i - kBaseQuality << "\t" << quality_count[i] << "\n";
