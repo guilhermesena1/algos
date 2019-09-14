@@ -82,11 +82,11 @@ int_to_seq(size_t v, const size_t &kmer_size) {
 }
 
 // a 64-bit hash of the last 32 characters of a read
-static size_t 
-get_suffix_hash (const string &s){
+static size_t
+get_suffix_hash(const string &s) {
   size_t ans = 0;
-  for(size_t i = 0; i < s.size(); ++i)
-    if(i >= s.size() - 32)
+  for (size_t i = 0; i < s.size(); ++i)
+    if (i >= s.size() - 32)
       ans = ((ans << 2) | ((s[i] >> 1) & 3));
 
   return ans;
@@ -100,12 +100,12 @@ struct FastqStats {
  public:
   /*************** UNIVERSAL CONSTANTS ************************/
 
-  // This can be a very large number, the maximum illumina read size. 
+  // This can be a very large number, the maximum illumina read size.
   // Affects base memory footprint
   static const size_t kNumBases = 1000;
 
   // Value to subtract quality characters to get the actual quality value
-  static const size_t kBaseQuality = 33; // The ascii for the lowest quality
+  static const size_t kBaseQuality = 33;  // The ascii for the lowest quality
   static const size_t kNumChars = 4;  // A = 000,C = 001,T = 010,G = 011,N = 111
   static const size_t kNumAsciiChars = 256;  // Number of ascii chars
 
@@ -154,7 +154,7 @@ struct FastqStats {
   // Counts of quality in each base position
   array<size_t, kNumAsciiChars * kNumBases> position_quality_count;
 
-  // Counts of average quality (truncated) per sequence 
+  // Counts of average quality (truncated) per sequence
   array<size_t, kNumAsciiChars> quality_count;
 
   /*********** PER GC VALUE METRICS ****************/
@@ -247,10 +247,9 @@ FastqStats::FastqStats(const size_t _kmer_size) {
 }
 
 void
-FastqStats::make_suffix_lookup(){
-  for(auto v : seq_count){
-    if(v.second > kMinFracFrequency * kNumSlowReads){
-      cerr << "BLEH\t" << v.first << "\t" << v.second << "\n";
+FastqStats::make_suffix_lookup() {
+  for (auto v : seq_count) {
+    if (v.second > kMinFracFrequency * kNumSlowReads) {
       size_t suffix_hash = get_suffix_hash(v.first);
 
       // Registers the sequence associated to suffix
@@ -262,7 +261,7 @@ FastqStats::make_suffix_lookup(){
       // Adds the hash to look up
       suffix_lookup.insert(suffix_hash);
     }
-  } 
+  }
 }
 
 void
@@ -386,7 +385,7 @@ FastqReader::operator >> (FastqStats &stats) {
   cur_gc_count = 0;
   for (; *curr != '\n';) {
     // Need to store the character to know which base the quality read is
-    // associated to 
+    // associated to
     buff[read_pos] = *curr;
 
     // Gets data for ATGC
@@ -439,7 +438,7 @@ FastqReader::operator >> (FastqStats &stats) {
   read_pos = 0;
   for (; (*curr != '\n') && (curr < last);) {
     // Gets the base from buffer, finds index, adds quality value
-    if (buff[read_pos] == 'N'){
+    if (buff[read_pos] == 'N') {
       stats.n_base_quality[read_pos] += *curr;
     } else {
       base_ind = (buff[read_pos] >> 1) & 3;
@@ -456,24 +455,24 @@ FastqReader::operator >> (FastqStats &stats) {
     ++read_pos;
   }
   // Slow but idk how else to do it
-  stats.quality_count [cur_quality / read_pos]++;
+  stats.quality_count[cur_quality / read_pos]++;
 
   /************* SLOW STATISTICS FOR FIRST READS ****************/
-  if(stats.num_reads < stats.kNumSlowReads){
+  if (stats.num_reads < stats.kNumSlowReads) {
     buff[read_pos] = '\0';
     stats.seq_count[string(buff)]++;
 
   // Here we keep the frequent suffixes to check the future sequences
-  } else if(stats.num_reads == stats.kNumSlowReads){
+  } else if (stats.num_reads == stats.kNumSlowReads) {
     stats.make_suffix_lookup();
 
   // Otherwise we just lookup the overrepresented sequence
   } else {
     auto got = stats.suffix_lookup.find(cur_kmer);
-    if(got != stats.suffix_lookup.end()){
+    if (got != stats.suffix_lookup.end()) {
       buff[read_pos] = '\0';
-      for(size_t i = 0; i < stats.suffix_seq[cur_kmer].size(); ++i)
-        if(string(buff) == stats.suffix_seq[cur_kmer][i])
+      for (size_t i = 0; i < stats.suffix_seq[cur_kmer].size(); ++i)
+        if (string(buff) == stats.suffix_seq[cur_kmer][i])
           stats.suffix_count[cur_kmer][i]++;
     }
   }
@@ -516,10 +515,10 @@ FastqStats::write_basic_statistics(ostream &os) {
 void
 FastqStats::write_per_base_quality(ostream &os) {
   os << ">>Per base sequence quality pass\n";
-  os << "#Base\tMean\tMedian\tLower Quartile\tUpper Quartile" << 
+  os << "#Base\tMean\tMedian\tLower Quartile\tUpper Quartile" <<
         "\t10th Percentile 90th Percentile\n";
   size_t ldecile, lquartile, median, uquartile, udecile;
-  double mean,cur;
+  double mean, cur;
 
   for (size_t i = 0; i < kNumBases; ++i) {
     if (cumulative_read_length_freq[i] > 0) {
@@ -537,21 +536,24 @@ FastqStats::write_per_base_quality(ostream &os) {
       // Iterate through quality values to find quantiles in increasing order
       for (size_t j = 0; j < kNumAsciiChars; ++j) {
         cur = position_quality_count[(i << 8) + j];
-        if(counts < ldecile_thresh && counts + cur >= ldecile_thresh)
+
+        // Finds in which bin of the histogram reads are
+        if (counts < ldecile_thresh && counts + cur >= ldecile_thresh)
           ldecile = j - kBaseQuality;
-        if(counts < lquartile_thresh && counts + cur >= lquartile_thresh)
+        if (counts < lquartile_thresh && counts + cur >= lquartile_thresh)
           lquartile = j - kBaseQuality;
-        if(counts < median_thresh && counts + cur >= median_thresh)
+        if (counts < median_thresh && counts + cur >= median_thresh)
           median = j - kBaseQuality;
-        if(counts < uquartile_thresh && counts + cur >= uquartile_thresh)
+        if (counts < uquartile_thresh && counts + cur >= uquartile_thresh)
           uquartile = j - kBaseQuality;
-        if(counts < udecile_thresh && counts + cur >= udecile_thresh)
+        if (counts < udecile_thresh && counts + cur >= udecile_thresh)
           udecile = j - kBaseQuality;
+
         mean += cur*j;
         counts += cur;
       }
 
-      // Normalize mean 
+      // Normalize mean
       mean = mean / nreads - kBaseQuality;
 
       // Write distribution to new line
@@ -656,11 +658,11 @@ FastqStats::write_overrepresented_sequences(ostream &os) {
   os << "#Sequence\tCount\tPercentage\tPossible Source\n";
 
   vector <pair<string, size_t>> ct_pairs;
-  for(auto v : suffix_lookup){
-    for(size_t i = 0; i < suffix_count[v].size(); ++i)
-      if(suffix_count[v][i] > kMinFracFrequency * num_reads)
+  for (auto v : suffix_lookup) {
+    for (size_t i = 0; i < suffix_count[v].size(); ++i)
+      if (suffix_count[v][i] > kMinFracFrequency * num_reads)
         ct_pairs.push_back(make_pair(suffix_seq[v][i]
-                                  ,suffix_count[v][i]));
+                                  , suffix_count[v][i]));
   }
 
   // Sort strings by frequency
@@ -668,8 +670,8 @@ FastqStats::write_overrepresented_sequences(ostream &os) {
         return a.second > b.second;
       });
 
-  for(auto seq : ct_pairs)
-      os << seq.first << "\t" << seq.second <<  "\t" << 
+  for (auto seq : ct_pairs)
+      os << seq.first << "\t" << seq.second <<  "\t" <<
         100.0 * seq.second / num_reads << "\t???\n";
   os << ">>END_MODULE\n";
 }
