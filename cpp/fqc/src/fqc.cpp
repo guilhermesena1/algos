@@ -217,8 +217,7 @@ struct FastqStats {
   /*********** SINGLE NUMBERS FROM THE ENTIRE FASTQ ****************/
   size_t total_bases;  // sum of all bases in all reads
   size_t avg_read_length;  // average of all read lengths
-  size_t avg_gc;  // sum of g bases + c bases
-  size_t avg_n;  // sum of n bases
+  double avg_gc;  // sum of g bases + c bases
   size_t num_reads;  // total number of lines read
   size_t num_poor;  // reads whose average quality was <= poor
 
@@ -301,7 +300,6 @@ FastqStats::FastqStats(const size_t _kmer_size) {
   total_bases = 0;
   avg_read_length = 0;
   avg_gc = 0;
-  avg_n = 0;
   num_reads = 0;
   num_poor = 0;
 
@@ -355,9 +353,14 @@ FastqStats::calc_summary() {
 
   // GC %
   avg_gc = 0;
-  for (size_t i = 0; i < kNumBases; ++i)
-    avg_gc += gc_count[i];
-  avg_gc /= num_reads;
+
+  // counts bases G and C in each base position
+  for (size_t i = 0; i < kNumBases; ++i) {
+    avg_gc += base_count[(i << kBitShiftNucleotide) | 1]; // C
+    avg_gc += base_count[(i << kBitShiftNucleotide) | 3]; // G
+  }
+  
+  avg_gc = 100 * avg_gc / total_bases;
 
   // Poor quality reads
   num_poor = 0;
@@ -563,6 +566,11 @@ FastqStats::calc_summary() {
    // Convert to percentage
   for (auto &v : percentage_total)
     v = 100.0 * v / seq_total;  // Percentage of sequences in bin
+
+  // pass warn fail criteria
+  if (1 - percentage_total[0] > 0.5)
+    pass_duplicate_sequences = "fail";
+
  
   /************** OVERREPRESENTED SEQUENCES ********************/
   pass_overrepresented_sequences = "pass";
@@ -612,9 +620,10 @@ struct FastqReader{
   size_t base_ind;  // 0,1,2 or 3
   size_t read_pos;  // which base we are at in the read
   size_t quality_value;  // to convert from ascii to number
-  size_t cur_gc_count;
-  size_t cur_quality;
-  size_t kmer_pos;
+  size_t cur_gc_count;  // Number of gc bases in read
+  size_t cur_quality;  // Sum of quality values in read
+  size_t cur_prefix;  // 32-bit prefix 
+  size_t kmer_pos;  // count of k-mers that reset at every N
   void *mmap_data;
 
   // Temporarily store line 2 out of 4 to know the base to which
@@ -748,11 +757,9 @@ FastqReader::read_sequence_line(FastqStats &stats){
 
       // Increment char and read position
       curr++;
-      read_pos++;
       
-      if(stats.num_reads < stats.kNumSlowReads)
-        if(read_pos == stats.kPrefixPosition)
-          stats.prefix_count[cur_kmer]++;
+      if(read_pos == stats.kPrefixPosition)
+        cur_prefix = cur_kmer;
       
     } else {
       // Otherwise fast forward subsequent nucleotides
@@ -760,12 +767,23 @@ FastqReader::read_sequence_line(FastqStats &stats){
         ++curr;
 
     }
+
+    read_pos++;
   }
-
   ++curr;  // skips \n from line 2
-  stats.read_length_freq[read_pos - 1]++;  // read length distribution
-  stats.gc_count[100 *cur_gc_count / read_pos]++;  // gc histogram
 
+  // Updates statistics
+  stats.total_bases += read_pos;  // updates total bases
+
+  // statistics for only the first kNumBases
+  if(read_pos > stats.kNumBases)
+    read_pos = stats.kNumBases;
+
+  // Registers read length
+  stats.read_length_freq[read_pos - 1]++;  // read length distribution
+
+  // Registers GC %
+  stats.gc_count[100 *cur_gc_count / read_pos]++;  // gc histogram
 }
 
 // Reads the quality line of each base. 
@@ -817,6 +835,7 @@ inline void
 FastqReader::process_slow_read(FastqStats &stats){
   buff[read_pos] = '\0';
   stats.seq_count[string(buff)]++;
+  stats.prefix_count[cur_prefix]++;
 }
 
 // Every fast lookup done in all remaining reads
