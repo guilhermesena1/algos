@@ -100,6 +100,20 @@ get_suffix_hash(const string &s) {
   return ans;
 }
 
+size_t
+log2exact (size_t powerOfTwo) {
+  if (powerOfTwo & (powerOfTwo - 1))
+    throw std::runtime_error("not a power of two!");
+
+  size_t ans = 0;
+  while (powerOfTwo > 0) {
+    ans++;
+    powerOfTwo >>= 1;
+  }
+
+  return ans - 1;
+}
+
 /*************************************************************
  ******************** FASTQ STATS ****************************
  *************************************************************/
@@ -122,11 +136,11 @@ struct FastqStats {
   // Illumina gives qualities from 0 to 40, therefore we set it as 64. Power of
   // is to avoid double pointer jumps and to get indices with bit shifts. 
   static const size_t kNumQualityValues = 64; 
-  static const size_t kBitShiftQuality = 6;  // log 2 of value above
+  size_t kBitShiftQuality;  // log 2 of value above
 
   // How many possible nucleotides (must be power of 2!)
   static const size_t kNumNucleotides = 4;  // A = 00,C = 01,T = 10,G = 11
-  static const size_t kBitShiftNucleotide = 2;  // log 2 of value above
+  size_t kBitShiftNucleotide;  // log 2 of value above
 
   // threshold for a sequence to be considered  poor quality
   static const size_t kPoorQualityThreshold = 20;
@@ -208,7 +222,6 @@ struct FastqStats {
          pass_per_sequence_gc_content,
          pass_per_base_n_content,
          pass_sequence_length_distribution,
-         pass_sequence_duplication_levels,
          pass_overrepresented_sequences,
          pass_duplicate_sequences,
          pass_kmer_content,
@@ -309,6 +322,10 @@ FastqStats::FastqStats(const size_t _kmer_size) {
   base_quality.fill(0);
   n_base_quality.fill(0);
   read_length_freq.fill(0);
+
+  // Defines bit shift values
+  kBitShiftNucleotide = log2exact(kNumNucleotides);
+  kBitShiftQuality = log2exact(kNumQualityValues);
 
   // Defines k-mer mask, length and allocates vector
   kmer_size = _kmer_size;
@@ -1017,7 +1034,7 @@ FastqStats::write_sequence_length_distribution(ostream &os) {
 void
 FastqStats::write_sequence_duplication_levels(ostream &os) {
   os << ">>Sequence Duplication Levels\t" << 
-         pass_sequence_duplication_levels << "\n";
+         pass_duplicate_sequences << "\n";
 
   os << "#Duplication Level  Percentage of deduplicated  Percentage of total\n";
   for(size_t i = 0; i < 9; ++i)
