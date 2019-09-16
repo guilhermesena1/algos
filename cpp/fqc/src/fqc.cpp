@@ -118,13 +118,15 @@ struct FastqStats {
   // Value to subtract quality characters to get the actual quality value
   static const size_t kBaseQuality = 33;  // The ascii for the lowest quality
 
-  // How many possible quality values (must be power of 2!)
+  // Smallest power of two that comprises all possible Illumina quality values.
+  // Illumina gives qualities from 0 to 40, therefore we set it as 64. Power of
+  // is to avoid double pointer jumps and to get indices with bit shifts. 
   static const size_t kNumQualityValues = 64; 
   static const size_t kBitShiftQuality = 6;  // log 2 of value above
 
   // How many possible nucleotides (must be power of 2!)
   static const size_t kNumNucleotides = 4;  // A = 00,C = 01,T = 10,G = 11
-  static const size_t kBitShiftNucleotide = 6;  // log 2 of value above
+  static const size_t kBitShiftNucleotide = 2;  // log 2 of value above
 
   // threshold for a sequence to be considered  poor quality
   static const size_t kPoorQualityThreshold = 20;
@@ -136,11 +138,11 @@ struct FastqStats {
   // considered a candiate for overrepresentation
   constexpr static double kMinFracFrequency = 0.001;
 
+  // Position in which to store prefix for duplication estimate
+  static const size_t kPrefixPosition = 32;
+
   // Kmer size given as input
   size_t kmer_size;
-
-  // 4^kmer size
-  size_t kNumKmers;
 
   // mask to get only the first 2*k bits of the sliding window
   size_t kmer_mask;
@@ -191,6 +193,7 @@ struct FastqStats {
   unordered_map <size_t, vector <size_t> > suffix_count;
   unordered_map <size_t, vector <string> > suffix_seq;
   unordered_set <size_t> suffix_lookup;
+  unordered_map <size_t, size_t> prefix_count;
 
   /*********************************************************
    *********** METRICS SUMMARIZED AFTER IO *****************
@@ -235,6 +238,7 @@ struct FastqStats {
   array<double, 16> percentage_deduplicated;
   array<double, 16> percentage_total;
 
+  // Overrepresented sequences and the number of times they were seen
   vector<pair<string, size_t>> overrep_sequences;
   /*********************************************************
    ********************* NON-WRITE FUNCTIONS ***************
@@ -310,8 +314,7 @@ FastqStats::FastqStats(const size_t _kmer_size) {
 
   // Defines k-mer mask, length and allocates vector
   kmer_size = _kmer_size;
-  kNumKmers = (1ll << (2*kmer_size));
-  kmer_mask = kNumKmers - 1;
+  kmer_mask = (1ll << (2*kmer_size)) - 1;
   kmer_count = vector<size_t>(kmer_mask + 1, 0);
 }
 
@@ -374,7 +377,7 @@ FastqStats::calc_summary() {
   pass_per_base_sequence_quality = "pass";
 
   // Quality quantiles for base positions
-  size_t cur;
+  size_t cur;  // for readability, get the quality x position count
   for (size_t i = 0; i < kNumBases; ++i) {
     if (cumulative_read_length_freq[i] > 0) {
       mean[i] = 0;
@@ -509,7 +512,7 @@ FastqStats::calc_summary() {
   double seq_total = 0, seq_dedup = 0;
 
   // Seq counts has the exact count for the first kNumSlowReas sequences
-  for (auto v : seq_count) {
+  for (auto v : prefix_count) {
     if(v.second < 10){
       percentage_deduplicated[v.second - 1]++;
       percentage_total[v.second - 1] += v.second; 
@@ -552,13 +555,14 @@ FastqStats::calc_summary() {
     seq_total += v.second;
     seq_dedup += 1.0;
   }
+
   // Convert to percentage
   for (auto &v : percentage_deduplicated)
-    v = 100.0 * v / seq_dedup;  // Number of unique sequences when deduplciated
+    v = 100.0 * v / seq_dedup;  // Percentage of unique sequences in bin
 
    // Convert to percentage
   for (auto &v : percentage_total)
-    v = 100.0 * v / seq_total;  // Number of unique sequences when deduplciated
+    v = 100.0 * v / seq_total;  // Percentage of sequences in bin
  
   /************** OVERREPRESENTED SEQUENCES ********************/
   pass_overrepresented_sequences = "pass";
@@ -613,19 +617,19 @@ struct FastqReader{
   size_t kmer_pos;
   void *mmap_data;
 
-  // Temporarily store the second read of the 4 lines to know the base to which
+  // Temporarily store line 2 out of 4 to know the base to which
   // quality characters are associated
   char *buff;
 
   size_t cur_kmer;  // 32-mer hash as you pass through the sequence line
 
   /************ FUNCTIONS TO READ LINES IN DIFFERENT WAYS ***********/
-  inline void read_fast_forward_line();
-  inline void read_tile_line(FastqStats &stats);
-  inline void read_sequence_line(FastqStats &stats);
-  inline void read_quality_line(FastqStats &stats);
-  inline void process_slow_read(FastqStats &stats);
-  inline void process_fast_read(FastqStats &stats);
+  inline void read_fast_forward_line();  // run this to ignore a line
+  inline void read_tile_line(FastqStats &stats);  // get tile from read name
+  inline void read_sequence_line(FastqStats &stats);  // parse sequence
+  inline void read_quality_line(FastqStats &stats);  // parse quality
+  inline void process_slow_read(FastqStats &stats);  // hash string
+  inline void process_fast_read(FastqStats &stats); 
 
  public:
   explicit FastqReader(const size_t buffer_size);
@@ -744,8 +748,12 @@ FastqReader::read_sequence_line(FastqStats &stats){
 
       // Increment char and read position
       curr++;
-
       read_pos++;
+      
+      if(stats.num_reads < stats.kNumSlowReads)
+        if(read_pos == stats.kPrefixPosition)
+          stats.prefix_count[cur_kmer]++;
+      
     } else {
       // Otherwise fast forward subsequent nucleotides
       while (*curr != '\n')
@@ -799,6 +807,8 @@ FastqReader::read_quality_line(FastqStats &stats){
   }
   ++curr;  // skip \n
 
+  // Average quality approximated to the nearest integer. Used to make a
+  // histogram in the end of the summary. 
   stats.quality_count[cur_quality / read_pos]++;  // avg quality histogram
 }
 
@@ -827,7 +837,6 @@ FastqReader::process_fast_read(FastqStats &stats){
   }
 }
 
-
 inline bool
 FastqReader::operator >> (FastqStats &stats) {
   // Get tile number on 1st line
@@ -837,24 +846,21 @@ FastqReader::operator >> (FastqStats &stats) {
   read_sequence_line(stats);
 
   // fast forward third line
-
   read_fast_forward_line();
 
   // Process quality values
   read_quality_line(stats);
 
+  // Hash the entire read string to check for overrepresentation
   if (stats.num_reads < stats.kNumSlowReads) {
     process_slow_read(stats);
   }
 
-  /******** SLOW STATISTICS BETWEEN SLOW AND FAST READS *********/
-  // Here we keep the frequent suffixes to check the future sequences
+  // Keep the frequent suffixes to check the future sequences
   else if (stats.num_reads == stats.kNumSlowReads) {
     stats.make_suffix_lookup();
   }
 
-
-  /******** FAST SUFFIX LOOKUP **********************************/
   // Otherwise we just lookup the overrepresented sequence
   else {
     process_fast_read(stats);
