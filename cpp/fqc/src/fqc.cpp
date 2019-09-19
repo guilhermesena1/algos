@@ -1,8 +1,8 @@
-/* fqc: what this program does
+/* fqc: quality control for fastq files
 *
-* Copyright (C) 2019 Guilherme De Sena Brandine
-*
-* Authors: Guilherme De Sena Brandine
+* Copyright (C) 2019 Guilherme De Sena Brandine and
+*                    Andrew D. Smith
+* Authors: Guilherme De Sena Brandine, Andrew Smith
 *
 * This program is free software: you can redistribute it and/or
 * modify it under the terms of the GNU General Public License as
@@ -38,7 +38,6 @@
 #include "smithlab_utils.hpp"
 #include "smithlab_os.hpp"
 #include "OptionParser.hpp"
-#include "zlib_wrapper.hpp"
 
 using std::string;
 using std::runtime_error;
@@ -57,7 +56,6 @@ using std::make_pair;
 using std::ifstream;
 using std::sort;
 using std::max;
-
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
  *************************************************************/
@@ -65,9 +63,9 @@ using std::max;
 // converts 64 bit integer to a sequence string by reading 2 bits at a time and
 // converting back to ACTG
 static inline string
-int_to_seq(size_t v, const size_t &kmer_size) {
+size_t_to_seq(size_t v, const size_t seq_length) {
   string ans;
-  for (size_t i = 0; i < kmer_size; ++i) {
+  for (size_t i = 0; i < seq_length; ++i) {
     switch (v & 3) {
       case 0: ans.push_back('A'); break;
       case 1: ans.push_back('C'); break;
@@ -76,8 +74,6 @@ int_to_seq(size_t v, const size_t &kmer_size) {
     }
     v >>= 2;
   }
-  if (v > 0)
-    throw std::runtime_error("bad kmer");
 
   reverse(ans.begin(), ans.end());
   return ans;
@@ -85,21 +81,11 @@ int_to_seq(size_t v, const size_t &kmer_size) {
 
 // Converts A,T,G,C to 2-bit values
 static inline size_t
-atgc_to_2bit(const char &c) {
+actg_to_2bit(const char &c) {
   return ((c >> 1) & 3);
 }
 
-// a 64-bit hash of the last 32 characters of a read
-static inline size_t
-get_suffix_hash(const string &s) {
-  size_t ans = 0;
-  for (size_t i = 0; i < s.size(); ++i)
-    if (i >= s.size() - 32)
-      ans = ((ans << 2) | (atgc_to_2bit(s[i])));
-
-  return ans;
-}
-
+// log of a power of two, to use in bit shifting for fast index acces
 size_t
 log2exact(size_t powerOfTwo) {
   if (powerOfTwo & (powerOfTwo - 1))
@@ -114,6 +100,118 @@ log2exact(size_t powerOfTwo) {
   return ans - 1;
 }
 
+// FastQC extrapolation of counts to the full file size
+double get_corrected_count (size_t countAtLimit,
+                            size_t totalCount,
+                            size_t duplicationLevel,
+                            size_t numberOfObservations) {
+
+  // See if we can bail out early
+  if (countAtLimit == totalCount)
+    return numberOfObservations;
+
+  // If there aren't enough sequences left to hide another sequence with this count then
+  // we can also skip the calculation
+  if (totalCount - numberOfObservations < countAtLimit) 
+    return numberOfObservations;
+
+  // If not then we need to see what the likelihood is that we had 
+  // another sequence with this number of observations which we would 
+  // have missed. We'll start by working out the probability of NOT seeing a 
+  // sequence with this duplication level within the first countAtLimit 
+  // sequences of numberOfObservations.  This is easier than calculating
+  // the probability of seeing it.
+  double pNotSeeingAtLimit = 1.0;
+
+  // To save doing long calculations which are never going to produce anything meaningful
+  // we'll set a limit to our p-value calculation.  This is the probability below which we
+  // won't increase our count by 0.01 of an observation.  Once we're below this we stop caring
+  // about the corrected value since it's going to be so close to the observed value that
+  // we can just return that instead.
+  double limitOfCaring = 1.0 - (numberOfObservations/(numberOfObservations + 0.01));
+  for (size_t i = 0; i < countAtLimit; ++i) {
+    pNotSeeingAtLimit *= static_cast<double>((totalCount-i)-duplicationLevel) /
+                         static_cast<double>(totalCount-i);
+
+    if (pNotSeeingAtLimit < limitOfCaring) {
+      pNotSeeingAtLimit = 0;
+      break;
+    }
+  }
+
+
+  // Now we can assume that the number we observed can be 
+  // scaled up by this proportion
+  return numberOfObservations/(1 - pNotSeeingAtLimit);
+}
+/*************************************************************
+ ******************** HASHING OF 50bp  ***********************
+ *************************************************************/
+class NinetySixBPSequence {
+ public:
+  size_t sz;
+  bool has_n;
+
+  array <size_t, 3> twobit;
+  bool operator == (const NinetySixBPSequence &rhs) const {
+    if(sz != rhs.sz)
+      return false;
+
+    for (size_t i = 0; i < 3; ++i)
+      if (twobit[i] != rhs.twobit[i])
+        return false;
+    return true;
+  }
+
+  NinetySixBPSequence (){
+    twobit.fill(0);
+    sz = 0;
+  }
+
+  NinetySixBPSequence(string s) {
+    sz = 96;
+    has_n = false;
+    if(s.size() < 96)
+      sz = s.size();
+
+    twobit.fill(0);
+    for (size_t i = 0; i < sz; ++i) {
+      if(s[i] == 'N') {
+        has_n = true;
+        return;
+      }
+        
+      if (i < 32) {
+        twobit[0] = ((twobit[0] << 2) | actg_to_2bit(s[i]));
+      } else if (i < 64) {
+        twobit[1] = ((twobit[1] << 2) | actg_to_2bit(s[i]));
+      } else {
+        twobit[2] = ((twobit[2] << 2) | actg_to_2bit(s[i]));
+      }
+    }
+  }
+
+  string to_string() const {
+    if(sz < 32)
+      return size_t_to_seq(twobit[0], sz);
+    else if (sz < 64)
+      return size_t_to_seq(twobit[0],32) + size_t_to_seq(twobit[1], sz - 32);
+
+    return size_t_to_seq(twobit[0],32) + 
+           size_t_to_seq(twobit[1], sz - 32) +
+           size_t_to_seq(twobit[2], sz - 64);
+  }
+};
+
+// Simple hash as the 32bit prefix
+template <>
+struct std::hash <NinetySixBPSequence> {
+  std::size_t operator() (const NinetySixBPSequence &k) const {
+    return k.twobit[0];
+  }
+};
+
+
 /*************************************************************
  ******************** FASTQ STATS ****************************
  *************************************************************/
@@ -124,10 +222,9 @@ struct FastqStats {
    *************** UNIVERSAL CONSTANTS ************************
    ************************************************************/
 
-  // This can be a very large number, the maximum illumina read size.
-  // Affects base memory footprint. Reads whose size is larger than this value
-  // will have their last nucleotides ignored and not summarized.
-  static const size_t kNumBases = 1e4;
+  // number of bases for which time optimization will be performed at the cost
+  // of memory
+  static const size_t kNumBases = 1000;
 
   // Value to subtract quality characters to get the actual quality value
   static const size_t kBaseQuality = 33;  // The ascii for the lowest quality
@@ -145,16 +242,29 @@ struct FastqStats {
   // threshold for a sequence to be considered  poor quality
   static const size_t kPoorQualityThreshold = 20;
 
-  // Number of reads in which to do slower operations such as hashing strings
-  static const size_t kNumSlowReads = 1e5;
 
+  /************* DUPLICATION ESTIMATES *************/
+  // Number of unique sequences to see before stopping estimating duplication
+  static const size_t kDupUniqueCutoff = 1e5;
+
+  // Maximum read length to store the entire read in memory
+  static const size_t kDupReadMaxSize = 75;
+
+  // Prefix size to cut if read length exceeds the value above
+  static const size_t kDupReadTruncateSize = 50;
+
+  // Number of unique sequences seen thus far
+  size_t num_unique_seen;
+
+  // How many reads were processed before num_unique_seen = kDupUniqueCutoff
+  size_t count_at_limit;
+
+  /************ OVERREPRESENTATION ESTIMTES **********/
   // fraction of the number of slow reads a sequence needs to be seen to be
   // considered a candiate for overrepresentation
-  constexpr static double kMinFracFrequency = 0.001;
+  constexpr static double kOverrepMinFrac = 0.001;
 
-  // Position in which to store prefix for duplication estimate
-  static const size_t kPrefixPosition = 32;
-
+  /************ KMER **********/
   // Kmer size given as input
   size_t kmer_size;
 
@@ -167,25 +277,27 @@ struct FastqStats {
   /*********** PER BASE METRICS ****************/
 
   // counts the number of bases in every read position
-  array<size_t, kNumNucleotides * kNumBases> base_count;
-
-  // counts the number of N bases in every read position
-  array<size_t, kNumNucleotides * kNumBases> n_base_count;
+  array<size_t, kNumNucleotides * kNumBases> base_count;  // ATGC
+  array<size_t, kNumNucleotides * kNumBases> n_base_count; // N
+  vector<vector<size_t>> long_base_count;
+  vector<size_t> long_n_base_count;
 
   // Sum of base qualities in every read position
-  array<size_t, kNumQualityValues * kNumBases> base_quality;
-
-  // Sum of N nucleotide base qualities in every position
-  array<size_t, kNumNucleotides * kNumBases> n_base_quality;
+  array<size_t, kNumQualityValues * kNumBases> base_quality;  // ATGC
+  array<size_t, kNumNucleotides * kNumBases> n_base_quality;  // N
+  vector<vector<size_t>> long_base_quality;
+  vector<size_t> long_n_base_quality;
 
   /*********** PER QUALITY VALUE METRICS ****************/
   // Counts of quality in each base position
   array<size_t, kNumQualityValues * kNumBases> position_quality_count;
+   vector<vector<size_t>> long_position_quality_count;
 
   // Counts of average quality (truncated) per sequence
   array<size_t, kNumQualityValues> quality_count;
 
   /*********** PER GC VALUE METRICS ****************/
+  // histogram of GC fraction in each read from 0 to 100%
   array<size_t, 101> gc_count;
 
   /********** KMER FREQUENCY ****************/
@@ -195,25 +307,28 @@ struct FastqStats {
   /*********** PER READ METRICS ***************/
   // Distribution of read lengths
   array<size_t, kNumBases> read_length_freq;
+  vector<size_t> long_read_length_freq;
+  /*********** SLOW STUFF *******************/
+
+  /****** DUPLICATION ********/
+  unordered_map <string, size_t> sequence_count;
+  double total_deduplicated_pct;
+
+  /****** OVERREPRESENTED SERQUENCES ********/
+  vector <pair<string,size_t>> overrep_sequences;
+
+  /*********************************************************
+   *********** METRICS SUMMARIZED AFTER IO *****************
+   *********************************************************/
 
   // I need this to know what to divide each base by
   // when averaging content, bases, etc. It stores, for every element i, how
   // many reads are of length >= i, ie, how many reads actually have a
   // nucleotide at position i
   array<size_t, kNumBases> cumulative_read_length_freq;
+  vector<size_t> long_cumulative_read_length_freq;
 
-  /*********** SLOW STUFF *******************/
-  unordered_map <string, size_t> seq_count;
-  unordered_map <size_t, vector <size_t> > suffix_count;
-  unordered_map <size_t, vector <string> > suffix_seq;
-  unordered_set <size_t> suffix_lookup;
-  unordered_map <size_t, size_t> prefix_count;
-
-  /*********************************************************
-   *********** METRICS SUMMARIZED AFTER IO *****************
-   *********************************************************/
-
-  /*********** PASS = 0 WARN = 1 FAIL = 2 **************/
+  /*********** PASS WARN FAIL MESSAGE FOR EACH METRIC **************/
   string pass_basic_statistics,
          pass_per_base_sequence_quality,
          pass_per_tile_sequence_quality,
@@ -232,11 +347,17 @@ struct FastqStats {
   size_t avg_read_length;  // average of all read lengths
   double avg_gc;  // sum of g bases + c bases
   size_t num_reads;  // total number of lines read
+  size_t max_read_length;  // total number of lines read
   size_t num_poor;  // reads whose average quality was <= poor
 
   // Quantiles for the position_quality_count
   array<size_t, kNumBases> ldecile, lquartile, median, uquartile, udecile;
   array<double, kNumBases> mean;
+
+  vector<size_t> long_ldecile, long_lquartile, long_median,
+                 long_uquartile,long_udecile;
+
+  vector<double> long_mean;
 
   // Percentages for per base sequence content
   array<double, kNumBases> a_pct,
@@ -244,28 +365,33 @@ struct FastqStats {
                            t_pct,
                            g_pct,
                            n_pct;
+  vector<double> long_a_pct,
+                 long_c_pct,
+                 long_t_pct,
+                 long_g_pct,
+                 long_n_pct;
 
   // For sequence duplication levels
   // 1 to 9, >10, >50, >100, >500, >1k, >5k, >10k+
   array<double, 16> percentage_deduplicated;
   array<double, 16> percentage_total;
 
-  // Overrepresented sequences and the number of times they were seen
-  vector<pair<string, size_t>> overrep_sequences;
-
   /**************** FUNCTIONS ****************************/
 
   // Default constructor that zeros everything
   explicit FastqStats(const size_t _kmer_size);
 
+  // Allocation of more read positions
+  inline void allocate_new_base();
+
   /******* DUPLICATION AND OVERREPRESENTATION *******/
   // Makes a hash map with keys as 32-bit suffixes and values as all the
   // candidate frequent sequences with that given suffix
-  void make_suffix_lookup();
 
   // Summarize all statistics we need before writing
   void summarize();
 
+  // Writes to outpute fastqc-style
   void write(ostream &os, string filename);
 };
 
@@ -275,7 +401,11 @@ FastqStats::FastqStats(const size_t _kmer_size) {
   avg_read_length = 0;
   avg_gc = 0;
   num_reads = 0;
+  max_read_length = 0;
   num_poor = 0;
+
+  num_unique_seen = 0;
+  count_at_limit = 0;
 
   // Initialize IO arrays
   base_count.fill(0);
@@ -283,6 +413,9 @@ FastqStats::FastqStats(const size_t _kmer_size) {
   base_quality.fill(0);
   n_base_quality.fill(0);
   read_length_freq.fill(0);
+  quality_count.fill(0);
+  gc_count.fill(0);
+  position_quality_count.fill(0);
 
   // Defines bit shift values
   kBitShiftNucleotide = log2exact(kNumNucleotides);
@@ -294,26 +427,23 @@ FastqStats::FastqStats(const size_t _kmer_size) {
   kmer_count = vector<size_t>(kmer_mask + 1, 0);
 }
 
-// function that makes a hash map, where keys are 32 character suffixes of reads
-// and values are all frequent strings that were seen in the first kNumSlowReads
-// reads
-void
-FastqStats::make_suffix_lookup() {
-  for (auto v : seq_count) {
-    // Candidates have at least half the fraction of frequency given as input
-    if (v.second > kMinFracFrequency * kNumSlowReads / 2.0) {
-      size_t suffix_hash = get_suffix_hash(v.first);
+// When we read new bases, dynamically allocate new space for their statistics
+inline void
+FastqStats::allocate_new_base() {
+  // count the number of times every read length was seen
+  long_read_length_freq.push_back(0);
 
-      // Registers the sequence associated to suffix
-      suffix_seq[suffix_hash].push_back(v.first);
+  // counts time each nucleotide was seen in each position
+  long_base_count.push_back(vector<size_t>(kNumNucleotides,0));
+  long_n_base_count.push_back(0);
 
-      // Registers how many times we have currently seen the string
-      suffix_count[suffix_hash].push_back(v.second);
+  // counts the time each quality value was seen for each nucleotide
+  long_base_quality.push_back(vector<size_t>(kNumNucleotides,0));
+  long_n_base_quality.push_back(0);
 
-      // Adds the hash to look up
-      suffix_lookup.insert(suffix_hash);
-    }
-  }
+  // counts the number of times each quality value was seen in each posittion
+  // to make quantiles and boxplots
+  long_position_quality_count.push_back(vector<size_t>(kNumQualityValues,0));
 }
 
 // Calculates all summary statistics and pass warn fails
@@ -323,19 +453,28 @@ FastqStats::summarize() {
   pass_basic_statistics = "pass";  // in fastqc, basic statistics is always pass
   // Average read length
   avg_read_length = 0;
-  for (size_t i = 0; i < kNumBases; ++i)
-    avg_read_length += i * read_length_freq[i];
-  avg_read_length /= num_reads;
-
-  // GC %
-  avg_gc = 0;
-
-  // counts bases G and C in each base position
-  for (size_t i = 0; i < kNumBases; ++i) {
-    avg_gc += base_count[(i << kBitShiftNucleotide) | 1];  // C
-    avg_gc += base_count[(i << kBitShiftNucleotide) | 3];  // G
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases)
+      total_bases += i * read_length_freq[i];
+    else
+      total_bases += i * long_read_length_freq[i - kNumBases];
   }
 
+  avg_read_length = total_bases / num_reads;
+
+  // counts bases G and C in each base position
+  avg_gc = 0;
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases) {
+      avg_gc += base_count[(i << kBitShiftNucleotide) | 1];  // C
+      avg_gc += base_count[(i << kBitShiftNucleotide) | 3];  // G
+    } else {
+      avg_gc += long_base_count[i - kNumBases][1];  // C
+      avg_gc += long_base_count[i - kNumBases][3];  // C
+    }
+  }
+  
+  // GC %
   avg_gc = 100 * avg_gc / total_bases;
 
   // Poor quality reads
@@ -345,68 +484,130 @@ FastqStats::summarize() {
 
   // Cumulative read length frequency
   size_t cumulative_sum = 0;
-  for (int64_t i = kNumBases - 1; i >= 0; --i) {
-    cumulative_sum += read_length_freq[i];
-    cumulative_read_length_freq[i] = cumulative_sum;
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases)
+      cumulative_sum += read_length_freq[i];
+    else
+      cumulative_sum += long_read_length_freq[i - kNumBases];
   }
 
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases) {
+      cumulative_read_length_freq[i] = cumulative_sum;
+      cumulative_sum -= read_length_freq[i];
+    }
+    else {
+      long_cumulative_read_length_freq.push_back(cumulative_sum);
+      cumulative_sum -= long_read_length_freq[i - kNumBases];
+    }
+  }
 
   /******************* PER BASE SEQUENCE QUALITY **********************/
   pass_per_base_sequence_quality = "pass";
 
   // Quality quantiles for base positions
   size_t cur;  // for readability, get the quality x position count
-  for (size_t i = 0; i < kNumBases; ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
-      mean[i] = 0;
-      size_t counts = 0;
+  double ldecile_thresh, 
+         lquartile_thresh,
+         median_thresh,
+         uquartile_thresh,
+         udecile_thresh;
 
-      // Number of counts I need to see to know in which bin each *ile is
-      double ldecile_thresh = 0.1 * cumulative_read_length_freq[i];
-      double lquartile_thresh = 0.25 * cumulative_read_length_freq[i];
-      double median_thresh = 0.5 * cumulative_read_length_freq[i];
-      double uquartile_thresh = 0.75 * cumulative_read_length_freq[i];
-      double udecile_thresh = 0.9 * cumulative_read_length_freq[i];
+  size_t cur_ldecile = 0,
+         cur_lquartile = 0,
+         cur_median = 0,
+         cur_uquartile = 0,
+         cur_udecile = 0;
 
-      // Iterate through quality values to find quantiles in increasing order
-      for (size_t j = 0; j < kNumQualityValues; ++j) {
-        cur = position_quality_count[(i << kBitShiftQuality) + j];
+  double cur_mean;
+  for (size_t i = 0; i < max_read_length; ++i) {
+    cur_mean = 0;
+    size_t counts = 0;
 
-        // Finds in which bin of the histogram reads are
-        if (counts < ldecile_thresh && counts + cur >= ldecile_thresh)
-          ldecile[i] = j;
-        if (counts < lquartile_thresh && counts + cur >= lquartile_thresh)
-          lquartile[i] = j;
-        if (counts < median_thresh && counts + cur >= median_thresh)
-          median[i] = j;
-        if (counts < uquartile_thresh && counts + cur >= uquartile_thresh)
-          uquartile[i] = j;
-        if (counts < udecile_thresh && counts + cur >= udecile_thresh)
-          udecile[i] = j;
+    // Number of counts I need to see to know in which bin each *ile is
+    if (i < kNumBases) {
+      ldecile_thresh = 0.1 * cumulative_read_length_freq[i];
+      lquartile_thresh = 0.25 * cumulative_read_length_freq[i];
+      median_thresh = 0.5 * cumulative_read_length_freq[i];
+      uquartile_thresh = 0.75 * cumulative_read_length_freq[i];
+      udecile_thresh = 0.9 * cumulative_read_length_freq[i];
+    } else {
+      ldecile_thresh = 0.1 * long_cumulative_read_length_freq[i - kNumBases];
+      lquartile_thresh = 0.25 * long_cumulative_read_length_freq[i - kNumBases];
+      median_thresh = 0.5 * long_cumulative_read_length_freq[i - kNumBases];
+      uquartile_thresh = 0.75 * long_cumulative_read_length_freq[i - kNumBases];
+      udecile_thresh = 0.9 * long_cumulative_read_length_freq[i - kNumBases];
+    }
+    // Iterate through quality values to find quantiles in increasing order
+    for (size_t j = 0; j < kNumQualityValues; ++j) {
+      if (i < kNumBases)
+        cur = position_quality_count[(i << kBitShiftQuality) | j];
+      else
+        cur = long_position_quality_count[i - kNumBases][j];
 
-        mean[i] += cur*j;
-        counts += cur;
-      }
+      // Finds in which bin of the histogram reads are
+      if (counts < ldecile_thresh && counts + cur >= ldecile_thresh)
+        cur_ldecile = j;
 
-      // Normalize mean
-      mean[i] = mean[i] / cumulative_read_length_freq[i];
+      if (counts < lquartile_thresh && counts + cur >= lquartile_thresh)
+        cur_lquartile = j;
 
-      // Pass warn fail criteria
-      if (pass_per_base_sequence_quality != "fail") {
-        if (lquartile[i] < 5)
-          pass_per_base_sequence_quality = "fail";
-        else if (lquartile[i] < 10)
-          pass_per_base_sequence_quality = "warn";
+      if (counts < median_thresh && counts + cur >= median_thresh)
+        cur_median = j;
 
-        if (median[i] < 20)
-          pass_per_base_sequence_quality = "fail";
-        else if (median[i] < 25)
-          pass_per_base_sequence_quality = "warn";
-      }
+      if (counts < uquartile_thresh && counts + cur >= uquartile_thresh)
+        cur_uquartile = j;
+
+      if (counts < udecile_thresh && counts + cur >= udecile_thresh)
+        cur_udecile = j;
+
+      cur_mean += cur*j;
+      counts += cur;
+    }
+
+
+    // Normalize mean
+    if (i < kNumBases)
+      cur_mean = cur_mean / cumulative_read_length_freq[i];
+    else
+      cur_mean = cur_mean / long_cumulative_read_length_freq[i - kNumBases];
+
+    if (i < kNumBases) {
+      mean[i] = cur_mean;
+      ldecile[i] = cur_ldecile;
+      lquartile[i] = cur_lquartile;
+      median[i] = cur_median;
+      uquartile[i] = cur_uquartile;
+      udecile[i] = cur_udecile;
+    } else {
+
+      long_mean.push_back(cur_mean);
+
+      long_ldecile.push_back(cur_ldecile);
+
+      long_lquartile.push_back(cur_lquartile);
+
+      long_median.push_back(cur_median);
+      long_uquartile.push_back(cur_uquartile);
+      long_udecile.push_back(cur_udecile);
+    }
+
+    // Pass warn fail criteria
+    if (pass_per_base_sequence_quality != "fail") {
+      if (cur_lquartile < 5)
+        pass_per_base_sequence_quality = "fail";
+      else if (cur_lquartile < 10)
+        pass_per_base_sequence_quality = "warn";
+
+      if (cur_median < 20)
+        pass_per_base_sequence_quality = "fail";
+      else if (cur_median < 25)
+        pass_per_base_sequence_quality = "warn";
     }
   }
 
   /******************* PER SEQUENCE QUALITY SCORE **********************/
+
   pass_per_sequence_quality_scores = "pass";
   size_t mode_val = 0;
   size_t mode_ind = 0;
@@ -424,112 +625,127 @@ FastqStats::summarize() {
     pass_per_sequence_quality_scores = "fail";
 
   /******************* PER BASE SEQUENCE CONTENT **********************/
+
   pass_per_base_sequence_content = "pass";
   size_t a, t, g, c, n;
   double total;
   double max_diff = 0.0;
-  for (size_t i = 0; i < kNumBases; ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases) {
       a = base_count[(i << kBitShiftNucleotide)];
       c = base_count[(i << kBitShiftNucleotide) + 1];
       t = base_count[(i << kBitShiftNucleotide) + 2];
       g = base_count[(i << kBitShiftNucleotide) + 3];
       n = n_base_count[i];
+    } else {
+      a = long_base_count[i - kNumBases][0];
+      c = long_base_count[i - kNumBases][1];
+      t = long_base_count[i - kNumBases][2];
+      g = long_base_count[i - kNumBases][3];
+      n = long_n_base_count[i - kNumBases];
+    }
 
-      // turns above values to percent
-      total = static_cast<double>(a+c+t+g+n);
+    // turns above values to percent
+    total = static_cast<double>(a + c + t + g + n);
+    if (i < kNumBases) {
       g_pct[i] = 100.0*g / total;
       a_pct[i] = 100.0*a / total;
       t_pct[i] = 100.0*t / total;
       c_pct[i] = 100.0*c / total;
       n_pct[i] = 100.0*n / total;
+    } else {
+      long_g_pct.push_back(100.0*g / total);
+      long_a_pct.push_back(100.0*a / total);
+      long_t_pct.push_back(100.0*t / total);
+      long_c_pct.push_back(100.0*c / total);
+      long_n_pct.push_back(100.0*n / total);
+    }
 
-      max_diff = max(max_diff, fabs(a-c));
-      max_diff = max(max_diff, fabs(a-t));
-      max_diff = max(max_diff, fabs(a-g));
-      max_diff = max(max_diff, fabs(c-t));
-      max_diff = max(max_diff, fabs(c-g));
-      max_diff = max(max_diff, fabs(t-g));
+    max_diff = max(max_diff, fabs(a-c));
+    max_diff = max(max_diff, fabs(a-t));
+    max_diff = max(max_diff, fabs(a-g));
+    max_diff = max(max_diff, fabs(c-t));
+    max_diff = max(max_diff, fabs(c-g));
+    max_diff = max(max_diff, fabs(t-g));
 
-      if (pass_per_base_sequence_content != "fail") {
-        if (max_diff > 0.2)
-          pass_per_base_sequence_content = "fail";
-        else if (max_diff > 0.1)
-          pass_per_base_sequence_content = "warn";
-      }
+    if (pass_per_base_sequence_content != "fail") {
+      if (max_diff > 0.2)
+        pass_per_base_sequence_content = "fail";
+      else if (max_diff > 0.1)
+        pass_per_base_sequence_content = "warn";
     }
   }
 
   /******************* PER BASE N CONTENT **********************/
+
   pass_per_base_n_content = "pass";
-  for (size_t i = 0; i < kNumBases; ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
-      if (pass_per_base_n_content != "fail") {
-        if (n_pct[i] > 20.0) {
-          cerr << "n failed at i = " << i << "\t" << n_pct[i] << "\n";
-          pass_per_base_n_content = "fail";
-        } else if (n_pct[i] > 10.0)
-          pass_per_base_n_content = "warn";
-      }
+  double cur_n_pct;
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (pass_per_base_n_content != "fail") {
+      if (i < kNumBases)
+        cur_n_pct = n_pct[i];
+      else
+        cur_n_pct = long_n_pct[i - kNumBases];
+
+      if (cur_n_pct > 20.0) {
+        pass_per_base_n_content = "fail";
+      } else if (cur_n_pct > 10.0)
+        pass_per_base_n_content = "warn";
     }
   }
 
   /************** SEQUENCE LENGTH DISTRIBUTION *****************/
   pass_sequence_length_distribution = "pass";
-  if (read_length_freq[avg_read_length] != num_reads)
+  size_t freq_of_avg;
+  
+  if (avg_read_length < kNumBases)
+    freq_of_avg = read_length_freq[avg_read_length];
+  else
+    freq_of_avg = long_read_length_freq[avg_read_length - kNumBases];
+
+  if (freq_of_avg != num_reads)
     pass_sequence_length_distribution = "warn";
   if (read_length_freq[0] > 0)
     pass_sequence_length_distribution = "fail";
 
-
   /************** DUPLICATE SEQUENCES **************************/
   pass_duplicate_sequences = "pass";
-  double seq_total = 0, seq_dedup = 0;
 
-  // Seq counts has the exact count for the first kNumSlowReas sequences
-  for (auto v : prefix_count) {
-    if (v.second < 10) {
-      percentage_deduplicated[v.second - 1]++;
-      percentage_total[v.second - 1] += v.second; 
+  double seq_total = 0.0;
+  double seq_dedup = 0.0;
+  unordered_map <size_t, size_t> counts_by_freq;
 
-    // Between 10 and 49
-    } else if (v.second >= 10 && v.second < 50) {
-      percentage_deduplicated[9]++;
-      percentage_total[9] += v.second; 
-
-    // Between 50 and 99
-    } else if (v.second >= 10 && v.second < 100) {
-      percentage_deduplicated[10]++;
-      percentage_total[10] += v.second; 
-
-    // Between 100 and 499
-    } else if (v.second >= 100 && v.second < 500) {
-      percentage_deduplicated[11]++;
-      percentage_total[11] += v.second; 
-
-    // Between 500 and 999
-    } else if (v.second >= 500 && v.second < 1000) {
-      percentage_deduplicated[12]++;
-      percentage_total[12] += v.second; 
-
-    // Between 1000 and 4999
-    } else if (v.second >= 1000 && v.second < 5000) {
-      percentage_deduplicated[13]++;
-      percentage_total[13] += v.second; 
-
-    // Between 5000 and 9999
-    } else if (v.second >= 5000 && v.second < 10000) {
-      percentage_deduplicated[14]++;
-      percentage_total[14]++;
-
-    // Over 10000
-    } else {
-      percentage_deduplicated[15]++;
-      percentage_total[15]++;
-    }
-    seq_total += v.second;
-    seq_dedup += 1.0;
+  for (auto v : sequence_count) {
+    if(counts_by_freq.count(v.second) == 0)
+      counts_by_freq[v.second] = 0;
+    counts_by_freq[v.second]++;
   }
+
+  for (auto v: counts_by_freq) {
+    counts_by_freq[v.first] = get_corrected_count (count_at_limit, 
+                                                             num_reads, 
+                                                             v.first, 
+                                                             v.second);
+  }
+
+  for (auto v : counts_by_freq) {
+    size_t dup_slot = v.first - 1;
+    if (v.first >= 10000) dup_slot = 15;
+    else if (v.first >= 5000) dup_slot = 14;
+    else if (v.first >= 1000) dup_slot = 13;
+    else if (v.first >= 500) dup_slot = 12;
+    else if (v.first >= 100) dup_slot = 11;
+    else if (v.first >= 50) dup_slot = 10;
+    else if (v.first >= 10) dup_slot = 9;
+
+    percentage_deduplicated[dup_slot] += v.second;
+    percentage_total[dup_slot] += v.second * v.first;
+
+    seq_total += v.second * v.first;
+    seq_dedup += v.second;
+  }
+
+  total_deduplicated_pct = 100.0 * seq_dedup / seq_total;
 
   // Convert to percentage
   for (auto &v : percentage_deduplicated)
@@ -539,38 +755,31 @@ FastqStats::summarize() {
   for (auto &v : percentage_total)
     v = 100.0 * v / seq_total;  // Percentage of sequences in bin
 
-  // pass warn fail criteria
-  if (1 - percentage_total[0] > 0.5)
+  // pass warn fail criteria : unique reads must be >80% 
+  // (otherwise warn) or >50% (otherwisefail)
+  if (percentage_total[0] <= 50)
     pass_duplicate_sequences = "fail";
-  else if (1 - percentage_total[0] > 0.2)
+  else if (percentage_total[0] <= 80)
     pass_duplicate_sequences = "warn";
- 
+
   /************** OVERREPRESENTED SEQUENCES ********************/
   pass_overrepresented_sequences = "pass";
-  for (auto v : suffix_lookup) {
-    for (size_t i = 0; i < suffix_count[v].size(); ++i)
-      if (suffix_count[v][i] > kMinFracFrequency * num_reads)
-        overrep_sequences.push_back(make_pair(suffix_seq[v][i]
-                                            , suffix_count[v][i]));
-  } 
+
+  // Keep only sequences that pass the input cutoff
+  for (auto it = sequence_count.begin(); it != sequence_count.end(); ++it) {
+    if (it->second > num_reads * kOverrepMinFrac)
+      overrep_sequences.push_back (make_pair(it->first, 
+                                              it->second));
+  }
 
   // Sort strings by frequency
   sort(overrep_sequences.begin(), overrep_sequences.end(), 
-      [](auto &a, auto &b){
-        return a.second > b.second;
-      });
-
-  for (auto seq : overrep_sequences) {
-    if (pass_overrepresented_sequences != "fail") {
-      if (seq.second > 0.01 * num_reads)
-        pass_overrepresented_sequences = "fail";
-      else if (seq.second > 0.001 * num_reads)
-        pass_overrepresented_sequences = "warn";
-    }
-  }
-
+       [](auto &a, auto &b){
+          return a.second > b.second;
+          });
   /************** ADAPTER CONTENT ******************************/
   pass_adapter_content = "pass";
+
 
   /************** KMER CONTENT *********************************/
   pass_kmer_content = "pass";
@@ -595,27 +804,35 @@ FastqStats::write(ostream &os, string filename) {
   os << ">>END_MODULE\n";
 
   // Per base quality
-  os << ">>Per base sequence quality\t" << 
+  os << ">>Per base sequence quality\t" <<
          pass_per_base_sequence_quality << "\n";
 
   os << "#Base\tMean\tMedian\tLower Quartile\tUpper Quartile" <<
         "\t10th Percentile 90th Percentile\n";
-  for (size_t i = 0; i < kNumBases; ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases) {
       // Write distribution to new line
-      os << i + 1 << "\t" 
-         << mean[i] << "\t" 
-         << median[i] << "\t" 
+      os << i + 1 << "\t"
+         << mean[i] << "\t"
+         << median[i] << "\t"
          << lquartile[i] << "\t"
-         << uquartile[i] << "\t" 
-         << ldecile[i] << "\t" 
+         << uquartile[i] << "\t"
+         << ldecile[i] << "\t"
          << udecile[i] << "\n";
+    } else {
+      os << i + 1 << "\t"
+         << long_mean[i - kNumBases] << "\t"
+         << long_median[i - kNumBases] << "\t"
+         << long_lquartile[i - kNumBases] << "\t"
+         << long_uquartile[i - kNumBases] << "\t"
+         << long_ldecile[i - kNumBases] << "\t"
+         << long_udecile[i - kNumBases] << "\n";
     }
   }
   os << ">>END_MODULE\n";
 
   // Per sequence quality scores
-  os << ">>Per sequence quality scores\t" << 
+  os << ">>Per sequence quality scores\t" <<
         pass_per_sequence_quality_scores << "\n";
 
   os << "#Quality\tCount\n";
@@ -627,18 +844,24 @@ FastqStats::write(ostream &os, string filename) {
   os << ">>END_MODULE\n";
 
   // Per base sequence content
-  os << ">>Per base sequence content\t" << 
+  os << ">>Per base sequence content\t" <<
         pass_per_base_sequence_content << "\n";
 
   os << "#Base\tG\tA\tT\tC\n";
 
-  for (size_t i = 0; i < kNumBases; ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases) {
       os << i+1 << "\t" <<
             g_pct[i] << "\t" <<
             a_pct[i] << "\t" <<
             t_pct[i] << "\t" <<
             c_pct[i] << "\n";
+    } else {
+      os << i+1 << "\t" <<
+            long_g_pct[i - kNumBases] << "\t" <<
+            long_a_pct[i - kNumBases] << "\t" <<
+            long_t_pct[i - kNumBases] << "\t" <<
+            long_c_pct[i - kNumBases] << "\n";
     }
   }
   os << ">>END_MODULE\n";
@@ -657,43 +880,61 @@ FastqStats::write(ostream &os, string filename) {
   os << ">>Per base N concent\t" << pass_per_base_n_content << "\n";
   os << "#Base\tN-Count\n";
 
-  for (size_t i = 0; i < kNumBases; ++i) {
-    if (cumulative_read_length_freq[i] > 0) 
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if (i < kNumBases)
       os << i+1 << "\t" << n_pct[i] << "\n";
+    else
+      os << i+1 << "\t" << long_n_pct[i - kNumBases] << "\n";
   }
 
   os << ">>END_MODULE\n";
 
   // Sequence length distribution
-  os << "Sequence Length Distribution\t" << 
+  os << "Sequence Length Distribution\t" <<
         pass_sequence_length_distribution << "\n";
 
-  os << "Length\tCount\n";
-  for (size_t i = 0; i < kNumBases; ++i)
-    if (read_length_freq[i] > 0)
-      os << i+1 << "\t" << read_length_freq[i] << "\n";
+ os << "Length\tCount\n";
+  for (size_t i = 0; i < max_read_length; ++i) {
+    if(i < kNumBases) {
+      if (read_length_freq[i] > 0)
+        os << i+1 << "\t" << read_length_freq[i] << "\n";
+    } else {
+      if (long_read_length_freq[i - kNumBases] > 0)
+        os << i + 1  << "\t" << long_read_length_freq[i - kNumBases] << "\n";
+    }
+  }
   os << ">>END_MODULE\n";
 
   // Sequence duplication levels
-  os << ">>Sequence Duplication Levels\t" << 
+  os << ">>Sequence Duplication Levels\t" <<
          pass_duplicate_sequences << "\n";
+
+  os << ">>Total Deduplicated Percentage\t" <<
+         total_deduplicated_pct << "\n";
 
   os << "#Duplication Level  Percentage of deduplicated  Percentage of total\n";
   for(size_t i = 0; i < 9; ++i)
-    os << i+1 << "\t" << percentage_deduplicated[i] << "\t" 
+    os << i+1 << "\t" << percentage_deduplicated[i] << "\t"
        << percentage_total[i] << "\n";
 
-  os << ">10\t" << percentage_deduplicated[9] << "\t" << percentage_total[9] << "\n";
-  os << ">50\t" << percentage_deduplicated[10] << "\t" << percentage_total[10] << "\n";
-  os << ">100\t" << percentage_deduplicated[11] << "\t" << percentage_total[11] << "\n";
-  os << ">500\t" << percentage_deduplicated[12] << "\t" << percentage_total[12] << "\n";
-  os << ">1k\t" << percentage_deduplicated[13] << "\t" << percentage_total[13] << "\n";
-  os << ">5k\t" << percentage_deduplicated[14] << "\t" << percentage_total[14] << "\n";
-  os << ">10k+\t" << percentage_deduplicated[15] << "\t" << percentage_total[15] << "\n";
+  os << ">10\t" << percentage_deduplicated[9]
+     << "\t" << percentage_total[9] << "\n";
+  os << ">50\t" << percentage_deduplicated[10]
+     << "\t" << percentage_total[10] << "\n";
+  os << ">100\t" << percentage_deduplicated[11]
+     << "\t" << percentage_total[11] << "\n";
+  os << ">500\t" << percentage_deduplicated[12]
+     << "\t" << percentage_total[12] << "\n";
+  os << ">1k\t" << percentage_deduplicated[13]
+     << "\t" << percentage_total[13] << "\n";
+  os << ">5k\t" << percentage_deduplicated[14]
+     << "\t" << percentage_total[14] << "\n";
+  os << ">10k+\t" << percentage_deduplicated[15]
+     << "\t" << percentage_total[15] << "\n";
   os << ">>END_MOUDLE\n";
 
   // Overrepresented sequences
-  os << ">>Overrepresented sequences\t" << 
+  os << ">>Overrepresented sequences\t" <<
         pass_overrepresented_sequences << "\n";
   os << "#Sequence\tCount\tPercentage\tPossible Source\n";
 
@@ -717,29 +958,50 @@ struct FastqReader{
   char *last;  // last position in file
   struct stat st;
 
+  // buffer size to store line 2 of each read
+  size_t buffer_size;
+
+  // Number of bases that have overflown the buffer
+  size_t leftover_ind;
+
+  // Whether or not to get bases from buffer when reading quality line
+  bool read_from_buffer;
+
+  // 50 bp prefix of each read
+  NinetySixBPSequence seq;
+
   // Temp variables to be updated as you pass through the file
   size_t base_ind;  // 0,1,2 or 3
   size_t read_pos;  // which base we are at in the read
   size_t quality_value;  // to convert from ascii to number
   size_t cur_gc_count;  // Number of gc bases in read
   size_t cur_quality;  // Sum of quality values in read
-  size_t cur_prefix;  // 32-bit prefix 
   size_t num_bases_after_n;  // count of k-mers that reset at every N
   void *mmap_data;
 
   // Temporarily store line 2 out of 4 to know the base to which
   // quality characters are associated
-  char *buff;
+  string buffer;
+  string leftover_buffer;
 
   size_t cur_kmer;  // 32-mer hash as you pass through the sequence line
 
+  /************ FUNCTIONS TO PROCESS READS AND BASES ***********/
+  inline void process_sequence_base_from_buffer(FastqStats &stats);
+  inline void process_sequence_base_from_leftover(FastqStats &stats);
+  inline void postprocess_sequence_line(FastqStats &stats);
+
+  inline void process_quality_base_from_buffer(FastqStats &stats);
+  inline void process_quality_base_from_leftover(FastqStats &stats);
+  inline void postprocess_quality_line(FastqStats &stats);
+
+  inline void postprocess_fastq_record(FastqStats &stats);
   /************ FUNCTIONS TO READ LINES IN DIFFERENT WAYS ***********/
   inline void read_fast_forward_line();  // run this to ignore a line
   inline void read_tile_line(FastqStats &stats);  // get tile from read name
   inline void read_sequence_line(FastqStats &stats);  // parse sequence
   inline void read_quality_line(FastqStats &stats);  // parse quality
-  inline void process_slow_read(FastqStats &stats);  // hash string
-  inline void process_fast_read(FastqStats &stats); 
+  inline void postrocess_sread(FastqStats &stats);  // hash string
 
  public:
   explicit FastqReader(const size_t buffer_size);
@@ -749,9 +1011,12 @@ struct FastqReader{
   inline bool operator >> (FastqStats &stats);
 };
 
-FastqReader::FastqReader(const size_t buffer_size) {
+FastqReader::FastqReader(const size_t _buffer_size) {
+  buffer_size = _buffer_size;
+
   // Allocates buffer to temporarily store reads
-  buff = new char[buffer_size];
+  buffer.resize(buffer_size + 1);
+  buffer[buffer_size] = '\0';
 }
 
 // Open file
@@ -791,6 +1056,14 @@ FastqReader::memorymap(const string &filename,
   last = curr + st.st_size - 1;
 }
 
+void
+FastqReader::memoryunmap() {
+  munmap(mmap_data, st.st_size);
+  buffer.clear();
+  leftover_buffer.clear();
+}
+
+
 // Gets the tile from the sequence name (if applicable)
 inline void
 FastqReader::read_tile_line(FastqStats &stats){
@@ -805,194 +1078,256 @@ FastqReader::read_fast_forward_line(){
   ++curr;  // skips \n from line 1
 }
 
+/*******************************************************/
+/*************** SEQUENCE PROCESSING *******************/
+/*******************************************************/
+
+// This is probably the most important function for speed, so it must be really
+// optimized at all times
+inline void
+FastqReader::process_sequence_base_from_buffer(FastqStats &stats) {
+  buffer[read_pos] = *curr;
+  if(*curr == 'N') {
+    stats.n_base_count[read_pos]++;
+    num_bases_after_n = 1;  // start over the current kmer
+  }
+
+  // ATGC bases
+  else {
+    base_ind = actg_to_2bit(*curr);
+    stats.base_count[(read_pos << stats.kBitShiftNucleotide) | base_ind]++;
+    cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
+    cur_gc_count += (base_ind & 1);
+
+    // registers k-mer if we've seen at least k nucleotides
+    if (num_bases_after_n == stats.kmer_size)
+      stats.kmer_count[cur_kmer & stats.kmer_mask]++;
+    else
+      num_bases_after_n++;
+  }
+}
+
+// slower version of process_sequence_base_from_buffer that dynamically
+// allocates
+inline void
+FastqReader::process_sequence_base_from_leftover(FastqStats &stats) {
+  // If not enough memory has been allocated in the leftover buffer
+  if (leftover_ind == leftover_buffer.size()) {
+    leftover_buffer.push_back(*curr);
+
+    // Lazy allocation
+    stats.allocate_new_base();
+  }
+
+  // use slots already allocated
+  else {
+    leftover_buffer[leftover_ind] = *curr;
+  }
+
+  // Process N bases like in the fast way
+  if(*curr == 'N') {
+    stats.long_n_base_count[leftover_ind]++;
+    num_bases_after_n = 1;  // start over the current kmer
+  }
+
+  // ATGC bases
+  else {
+    // These do not depend on dynamic allocation
+    base_ind = actg_to_2bit(*curr);
+    cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
+    cur_gc_count += (base_ind & 1);
+
+    // these are then buffer-equivalent statistic assignments
+    stats.long_base_count[leftover_ind][base_ind]++;
+
+    // Same k-mer code copied from buffer function
+    if (num_bases_after_n == stats.kmer_size)
+      stats.kmer_count[cur_kmer & stats.kmer_mask]++;
+    else
+      num_bases_after_n++;
+  }
+
+  ++leftover_ind;
+}
+
+// Gets statistics after reading the entire sequence line
+inline void
+FastqReader::postprocess_sequence_line(FastqStats &stats) {
+  // read length frequency histogram
+  if(read_pos < stats.kNumBases)
+    stats.read_length_freq[read_pos - 1]++;
+  else
+    stats.long_read_length_freq[read_pos - 1 - stats.kNumBases]++;
+
+  // Updates maximum read length if applicable
+  if (read_pos > stats.max_read_length)
+    stats.max_read_length = read_pos;
+
+  // Registers GC % in the bin truncated to the nearest integer
+  stats.gc_count[round(100 * cur_gc_count / static_cast<double>(read_pos))]++;
+
+}
+
 // Reads the line that has the biological sequence
 inline void
 FastqReader::read_sequence_line(FastqStats &stats){
+  // restart line counters
   read_pos = 0;
   cur_gc_count = 0;
   num_bases_after_n = 1;
-  /*********************************************************
-   ********** THIS LOOP MUST BE ALWAYS OPTIMIZED ***********
-   *********************************************************/
+  read_from_buffer = true;
+
+  /*********************************************************/
+  /********** THIS LOOP MUST BE ALWAYS OPTIMIZED ***********/
+  /*********************************************************/
   for (; *curr != '\n'; ++curr) {
-    // only collect statistics for the first kNumBases of each read
-    if (read_pos < stats.kNumBases) {
-      // Need to store the character to know which base the quality read is
-      // associated to
-      buff[read_pos] = *curr;
+    // statistics updated base by base
+    // use buffer
+    if (read_from_buffer)
+      process_sequence_base_from_buffer(stats);
+    
+    // use dynamic allocation
+    else 
+      process_sequence_base_from_leftover(stats);
+    
+    // either way increase read position
+    ++read_pos;
 
-      // Gets data for ATGC
-      if (*curr != 'N') {
-        // Transforms base into 3-bit index
-        // Bits 2,3 and 4 of charcters A,C,G,T and N are distinct so we can just
-        // use them to get the index instead of doing if-elses.
-        base_ind = atgc_to_2bit(*curr);
-
-        // Increments count of base
-        stats.base_count[(read_pos << stats.kBitShiftNucleotide) | base_ind]++;
-
-        // Hash the current kmer
-        cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
-
-        // number of gcs in the read, G and C have odd last bit
-        cur_gc_count += (base_ind & 1);
-
-        // If we already read >= k bases since the last N, 
-        // increment the k-mer count
-        if (num_bases_after_n == stats.kmer_size)
-          stats.kmer_count[cur_kmer & stats.kmer_mask]++;
-        else
-          num_bases_after_n++;
-      } else {
-        // Gets data for N
-        stats.n_base_count[read_pos]++;
-        num_bases_after_n = 1;  // start over the current kmer
-      }
-
-      if(read_pos == stats.kPrefixPosition)
-        cur_prefix = cur_kmer;
-      
-    } else {
-      // Otherwise fast forward subsequent nucleotides
-      while (*curr != '\n') {
-        ++curr;
-        read_pos++;
-      }
+    // Flag to start reading and writing outside of buffer
+    if(read_pos == buffer_size) {
+      leftover_ind = 0;
+      read_from_buffer = false;
     }
-
-    read_pos++;
   }
-  ++curr;  // skips \n from line 2
+  ++curr;  // skip \n
 
-  // Updates statistics
-  stats.total_bases += read_pos;  // updates total bases
-
-  // statistics for only the first kNumBases
-  if(read_pos > stats.kNumBases)
-    read_pos = stats.kNumBases;
-
-  // Registers read length
-  stats.read_length_freq[read_pos - 1]++;  // read length distribution
-
-  // Registers GC % in the bin truncated to the nearest integer
-  stats.gc_count[100 * cur_gc_count / read_pos]++;  // gc histogram
+  // statistics summarized after the read
+  postprocess_sequence_line(stats);
 }
 
-// Reads the quality line of each base. 
+
+/*******************************************************/
+/*************** QUALITY PROCESSING ********************/
+/*******************************************************/
+
+// Process quality value the fast way from buffer
+inline void
+FastqReader::process_quality_base_from_buffer(FastqStats &stats) {
+  if (buffer[read_pos] == 'N') {
+    stats.n_base_quality[read_pos] += quality_value;
+  } else {
+    base_ind = actg_to_2bit(buffer[read_pos]);
+    stats.base_quality[(read_pos << stats.kBitShiftNucleotide) | base_ind] 
+         += quality_value;
+  }
+  stats.position_quality_count[
+        (read_pos << stats.kBitShiftQuality) | quality_value]++;
+
+}
+
+// Slow version of function above
+inline void
+FastqReader::process_quality_base_from_leftover(FastqStats &stats) {
+  // All slots should already be allocated from passing through the read so we
+  // should not have to worry about lazy allocation
+  if (leftover_buffer[leftover_ind] == 'N') {
+    stats.long_n_base_quality[leftover_ind] += quality_value;
+  } else {
+    base_ind = actg_to_2bit(leftover_buffer[leftover_ind]);
+    stats.long_base_quality[leftover_ind][base_ind] += quality_value;
+  }
+
+  stats.long_position_quality_count[leftover_ind][quality_value]++;
+  ++leftover_ind;
+}
+
+// Reads the quality line of each base.
 inline void
 FastqReader::read_quality_line(FastqStats &stats){
-  cur_quality = 0;
+  // reset quality counts
   read_pos = 0;
-  quality_value = 0;
+  cur_quality = 0;
+  read_from_buffer = true;
+
   for (; (*curr != '\n') && (curr < last); ++curr) {
     // Converts quality ascii to zero-based
     quality_value = *curr - stats.kBaseQuality;
 
-    if(read_pos < stats.kNumBases){
+    // Fast bases from buffer 
+    if (read_pos < buffer_size) 
+      process_quality_base_from_buffer(stats);
 
-      // Gets the base from buffer, finds index, adds quality value for
-      // that respective base
-      if (buff[read_pos] == 'N') {
-        stats.n_base_quality[read_pos] += quality_value;
-      } else {
-        base_ind = atgc_to_2bit(buff[read_pos]);
-        stats.base_quality[(read_pos << stats.kBitShiftNucleotide) | base_ind] 
-              += quality_value;
-      }
+    // Slow bases from dynamic allocation
+    else
+      process_quality_base_from_leftover(stats);
 
-      // Sums quality value so we can bin the average at the end
-      cur_quality += quality_value;
+    // Sums quality value so we can bin the average at the end
+    cur_quality += quality_value;
+    ++read_pos;
 
-      // We store for every position x quality value pair the count
-      stats.position_quality_count[
-            (read_pos << stats.kBitShiftQuality) | quality_value]++;
-
-      ++read_pos;
-    } else {
-      // Fast forward if read is too large
-      while (*curr != '\n')
-        ++curr;
+    // Flag to start reading and writing outside of buffer
+    if(read_pos == buffer_size) {
+      leftover_ind = 0;
+      read_from_buffer = false;
     }
   }
   ++curr;  // skip \n
 
   // Average quality approximated to the nearest integer. Used to make a
-  // histogram in the end of the summary. 
+  // histogram in the end of the summary.
   stats.quality_count[cur_quality / read_pos]++;  // avg quality histogram
 }
 
-// Every slow process done in the first kNumSlowReads reads
+/*******************************************************/
+/*************** POST LINE PROCESSING ******************/
+/*******************************************************/
+
+/*************** THIS IS VERY SLOW ********************/
 inline void
-FastqReader::process_slow_read(FastqStats &stats){
-  buff[read_pos] = '\0';
+FastqReader::postprocess_fastq_record(FastqStats &stats) {
+  string s;
+  if(read_pos <= stats.kDupReadMaxSize)
+    s =(buffer.substr(0, read_pos));
+  else
+    s = (buffer.substr(0, stats.kDupReadTruncateSize));
 
-  // Stores a hash for the whole string as candidates for overrepresentation
-  stats.seq_count[string(buff)]++;
-
-  // Stores the 32 base prefix of reads to estimate duplication
-  stats.prefix_count[cur_prefix]++;
-}
-
-// Every fast lookup done in all remaining reads
-inline void
-FastqReader::process_fast_read(FastqStats &stats){
-  // cur_kmer has the last 32 bases stored. Look it up
-  // to count overrepresented sequences
-  auto got = stats.suffix_lookup.find(cur_kmer);
-  if (got != stats.suffix_lookup.end()) {
-    buff[read_pos] = '\0';
-
-    // Slow search of every sequence that ends with this suffix
-    for (size_t i = 0; i < stats.suffix_seq[cur_kmer].size(); ++i){
-      // Possible optimization is to make this string comparison faster
-      if (string(buff) == stats.suffix_seq[cur_kmer][i]) {
-        stats.suffix_count[cur_kmer][i]++;
-        break;  // get rid of this later
-      }
+  // New sequence found 
+  if(stats.sequence_count.count(s) == 0) {
+    if (stats.num_unique_seen != stats.kDupUniqueCutoff) {
+      stats.sequence_count.insert({{s, 1}});
+      stats.count_at_limit = stats.num_reads;
+      ++stats.num_unique_seen;
     }
+  } else {
+    stats.sequence_count[s]++;
+    if (stats.num_unique_seen < stats.kDupUniqueCutoff)
+      stats.count_at_limit = stats.num_reads;
   }
+
+  //stats.sequence_count[s]++;
+  //stats.count_at_limit++;
 }
+
+/*******************************************************/
+/*************** READ FASTQ RECORD *********************/
+/*******************************************************/
 
 inline bool
 FastqReader::operator >> (FastqStats &stats) {
-  // Get tile number on 1st line
   read_tile_line(stats);
-  
-  // Process sequence
   read_sequence_line(stats);
-
-  // fast forward third line
   read_fast_forward_line();
-
-  // Process quality values
   read_quality_line(stats);
-
-  // Hash the entire read string to check for overrepresentation
-  if (stats.num_reads < stats.kNumSlowReads) {
-    process_slow_read(stats);
-  }
-
-  // Keep the frequent suffixes to check the future sequences
-  else if (stats.num_reads == stats.kNumSlowReads) {
-    stats.make_suffix_lookup();
-  }
-
-  // Otherwise we just lookup the overrepresented sequence
-  else {
-    process_fast_read(stats);
-  }
+  postprocess_fastq_record(stats);
 
   // Successful read, increment number in stats
   stats.num_reads++;
 
   // Returns if file should keep being checked
   return (curr < last - 1);
+
 }
 
-void
-FastqReader::memoryunmap() {
-  munmap(mmap_data, st.st_size);
-}
 /******************************************************
  ********************* MAIN ***************************
  ******************************************************/
@@ -1075,7 +1410,8 @@ int main(int argc, const char **argv) {
     if(VERBOSE)
       // Equality is faster than modular arithmetics
       if (stats.num_reads == next_read) {
-        cerr << "Processed " << stats.num_reads / num_reads_to_log << "M reads.\n";
+        cerr << "Processed " << stats.num_reads / num_reads_to_log
+             << "M reads.\n";
         next_read += num_reads_to_log;
       }
   }
@@ -1103,7 +1439,6 @@ int main(int argc, const char **argv) {
 
   // Write
   stats.write(os, filename);
-
   /************** TIME SUMMARY *********************************/
   // TODO(gui) : find adapters with significant kmer enrichment
   if (VERBOSE)
@@ -1111,3 +1446,4 @@ int main(int argc, const char **argv) {
          << (clock() - begin) / CLOCKS_PER_SEC
          << " seconds\n";
 }
+
