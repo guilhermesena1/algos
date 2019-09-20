@@ -57,6 +57,7 @@ using std::ifstream;
 using std::sort;
 using std::max;
 using std::min;
+
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
  *************************************************************/
@@ -144,12 +145,63 @@ double get_corrected_count (size_t countAtLimit,
   // scaled up by this proportion
   return numberOfObservations/(1 - pNotSeeingAtLimit);
 }
+
+/*************************************************************
+ ******************** NORMAL DISTRIBUTION ********************
+ *************************************************************/
+struct NormalDistribution {
+ public:
+   double mean;
+   double stdev;
+   explicit NormalDistribution (double _mean, double _stdev):
+     mean (_mean), stdev(_stdev) {}
+
+   double dnorm (double x) {
+     double z = x - mean;
+     return exp(- (z*z)/ (2 * stdev *stdev));
+   }
+};
+
+double 
+sum_deviation_from_normal (const array <size_t, 101> &gc_content) {
+  double mode = 0.0, freq = 0.0, num_reads = 0.0;
+  for (size_t i = 0; i < 101; ++i) {
+    if (gc_content[i] > freq) {
+      mode = i;
+      freq = gc_content[i];
+    }
+    num_reads += gc_content[i];
+  }
+
+  double stdev = 0.0;
+  for (size_t i = 0; i < 101; ++i)
+    stdev += (mode - i) * (mode - i) * gc_content[i];
+
+  stdev = stdev / (num_reads - 1);
+
+  NormalDistribution nd (mode, sqrt(stdev));
+  double ans = 0.0, theoretical_sum = 0.0;
+  array <double, 101> theoretical;
+  for (size_t i = 0; i < 101; ++i) {
+    theoretical[i] = nd.dnorm(i);
+    theoretical_sum += theoretical[i];
+  }
+
+  for (size_t i = 0; i < 101; ++i)
+    theoretical[i] = theoretical[i] * num_reads / theoretical_sum;
+
+  for (size_t i = 0; i < 101; ++i) {
+    ans += fabs(gc_content[i] - theoretical[i]);
+  }
+  return ans / num_reads;
+}
+
 /*************************************************************
  ******************** HASHING OF 96bp  ***********************
  *************************************************************/
 
 // bit hashing of sequences of up to 96bp
-class SmallBPSequence {
+struct SmallBPSequence {
  public:
   size_t sz;
   bool has_n;
@@ -212,6 +264,7 @@ struct std::hash <SmallBPSequence> {
     return k.twobit[0];
   }
 };
+
 
 
 /*************************************************************
@@ -398,7 +451,7 @@ struct FastqStats {
                  long_g_pct,
                  long_n_pct;
 
-    /**************** FUNCTIONS ****************************/
+  /**************** FUNCTIONS ****************************/
 
   // Default constructor that zeros everything
   explicit FastqStats(const size_t _kmer_size);
@@ -709,6 +762,18 @@ FastqStats::summarize() {
         pass_per_base_sequence_content = "warn";
     }
   }
+
+  /******************* PER SEQUENCE GC CONTENT *****************/
+  pass_per_sequence_gc_content = "pass";
+  // fix the zero gcs by averaging around the adjacent values
+  for (size_t i = 1; i < 99; ++i) 
+    if (gc_count[i] == 0)
+      gc_count[i] = (gc_count[i+1] + gc_count[i-1])/2;
+  double gc_deviation = sum_deviation_from_normal(gc_count);
+  if (gc_deviation >= 0.3)
+    pass_per_sequence_gc_content = "fail";
+  else if (gc_deviation >= 0.15)
+    pass_per_sequence_gc_content = "warn";
 
   /******************* PER BASE N CONTENT **********************/
 
