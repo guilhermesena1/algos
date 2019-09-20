@@ -1044,6 +1044,7 @@ struct FastqReader{
   // quality characters are associated
   string buffer;
   string leftover_buffer;
+  string sequence_to_hash;  // the sequence that will be marked for duplication
 
   size_t cur_kmer;  // 32-mer hash as you pass through the sequence line
 
@@ -1501,21 +1502,20 @@ FastqReader::read_quality_line(FastqStats &stats){
 /*************** THIS IS VERY SLOW ********************/
 inline void
 FastqReader::postprocess_fastq_record(FastqStats &stats) {
-  string s;
   if(read_pos <= stats.kDupReadMaxSize)
-    s =(buffer.substr(0, read_pos));
+    sequence_to_hash = buffer.substr(0, read_pos);
   else
-    s = (buffer.substr(0, stats.kDupReadTruncateSize));
+    sequence_to_hash = buffer.substr(0, stats.kDupReadTruncateSize);
 
   // New sequence found 
-  if(stats.sequence_count.count(s) == 0) {
+  if(stats.sequence_count.count(sequence_to_hash) == 0) {
     if (stats.num_unique_seen != stats.kDupUniqueCutoff) {
-      stats.sequence_count.insert({{s, 1}});
+      stats.sequence_count.insert({{sequence_to_hash, 1}});
       stats.count_at_limit = stats.num_reads;
       ++stats.num_unique_seen;
     }
   } else {
-    stats.sequence_count[s]++;
+    stats.sequence_count[sequence_to_hash]++;
     if (stats.num_unique_seen < stats.kDupUniqueCutoff)
       stats.count_at_limit = stats.num_reads;
   }
@@ -1619,9 +1619,8 @@ int main(int argc, const char **argv) {
   // Allocates vectors to summarize data
   FastqStats stats(kmer_size);
 
-
   // Initializes a reader given the maximum number of bases to summarie
-  FastqReader in (100);
+  FastqReader in (stats.kNumBases);
   in.memorymap(filename, VERBOSE);
 
   // Read record by record
