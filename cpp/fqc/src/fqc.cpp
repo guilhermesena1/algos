@@ -102,26 +102,27 @@ log2exact(size_t powerOfTwo) {
   return ans - 1;
 }
 
+/******************* IMPLEMENTATION OF FASTQC FUNCTIONS **********************/
 // FastQC extrapolation of counts to the full file size
-double get_corrected_count (size_t countAtLimit,
-                            size_t totalCount,
-                            size_t duplicationLevel,
-                            size_t numberOfObservations) {
+double get_corrected_count (size_t count_at_limit,
+                            size_t num_reads,
+                            size_t dup_level,
+                            size_t num_obs) {
 
   // See if we can bail out early
-  if (countAtLimit == totalCount)
-    return numberOfObservations;
+  if (count_at_limit == num_reads)
+    return num_obs;
 
   // If there aren't enough sequences left to hide another sequence with this count then
   // we can also skip the calculation
-  if (totalCount - numberOfObservations < countAtLimit) 
-    return numberOfObservations;
+  if (num_reads - num_obs < count_at_limit) 
+    return num_obs;
 
   // If not then we need to see what the likelihood is that we had 
   // another sequence with this number of observations which we would 
   // have missed. We'll start by working out the probability of NOT seeing a 
-  // sequence with this duplication level within the first countAtLimit 
-  // sequences of numberOfObservations.  This is easier than calculating
+  // sequence with this duplication level within the first count_at_limit 
+  // sequences of num_obs.  This is easier than calculating
   // the probability of seeing it.
   double pNotSeeingAtLimit = 1.0;
 
@@ -130,10 +131,10 @@ double get_corrected_count (size_t countAtLimit,
   // won't increase our count by 0.01 of an observation.  Once we're below this we stop caring
   // about the corrected value since it's going to be so close to the observed value that
   // we can just return that instead.
-  double limitOfCaring = 1.0 - (numberOfObservations/(numberOfObservations + 0.01));
-  for (size_t i = 0; i < countAtLimit; ++i) {
-    pNotSeeingAtLimit *= static_cast<double>((totalCount-i)-duplicationLevel) /
-                         static_cast<double>(totalCount-i);
+  double limitOfCaring = 1.0 - (num_obs/(num_obs + 0.01));
+  for (size_t i = 0; i < count_at_limit; ++i) {
+    pNotSeeingAtLimit *= static_cast<double>((num_reads-i)-dup_level) /
+                         static_cast<double>(num_reads-i);
 
     if (pNotSeeingAtLimit < limitOfCaring) {
       pNotSeeingAtLimit = 0;
@@ -143,129 +144,50 @@ double get_corrected_count (size_t countAtLimit,
 
   // Now we can assume that the number we observed can be 
   // scaled up by this proportion
-  return numberOfObservations/(1 - pNotSeeingAtLimit);
+  return num_obs/(1 - pNotSeeingAtLimit);
 }
 
-/*************************************************************
- ******************** NORMAL DISTRIBUTION ********************
- *************************************************************/
-struct NormalDistribution {
- public:
-   double mean;
-   double stdev;
-   explicit NormalDistribution (double _mean, double _stdev):
-     mean (_mean), stdev(_stdev) {}
-
-   double dnorm (double x) {
-     double z = x - mean;
-     return exp(- (z*z)/ (2 * stdev *stdev));
-   }
-};
-
+// Function to calculate the deviation of a histogram with 100 bins from a
+// theoretical normal distribution with same mean and standard deviation
 double 
 sum_deviation_from_normal (const array <size_t, 101> &gc_content) {
   double mode = 0.0, freq = 0.0, num_reads = 0.0;
+
+  // Mode and total number of reads (note that we "smoothed" the gc content by
+  // filling up the 0 reads, so the number of reads is not the same as the
+  // number of reads in the whole fastq
   for (size_t i = 0; i < 101; ++i) {
-    if (gc_content[i] > freq) {
-      mode = i;
-      freq = gc_content[i];
-    }
+    mode += i*gc_content[i];
     num_reads += gc_content[i];
   }
+  mode /= num_reads;
 
+  // stadard deviation from the modde
   double stdev = 0.0;
   for (size_t i = 0; i < 101; ++i)
     stdev += (mode - i) * (mode - i) * gc_content[i];
+  stdev = sqrt(stdev / (num_reads - 1));
 
-  stdev = stdev / (num_reads - 1);
-
-  NormalDistribution nd (mode, sqrt(stdev));
-  double ans = 0.0, theoretical_sum = 0.0;
+  // theoretical sampling from a normal distribution with mean = mode and stdev
+  // = stdev to the mode from the sampled gc content from the data
+  double ans = 0.0, theoretical_sum = 0.0, z;
   array <double, 101> theoretical;
   for (size_t i = 0; i < 101; ++i) {
-    theoretical[i] = nd.dnorm(i);
+    z = i - mode;
+    theoretical[i] = exp(- (z*z)/ (2 * stdev *stdev));
     theoretical_sum += theoretical[i];
   }
 
+  // Normalize theoretical so it sums to the total of reads 
   for (size_t i = 0; i < 101; ++i)
     theoretical[i] = theoretical[i] * num_reads / theoretical_sum;
 
-  for (size_t i = 0; i < 101; ++i) {
+  for (size_t i = 0; i < 101; ++i)
     ans += fabs(gc_content[i] - theoretical[i]);
-  }
+  
+  // Fractional deviation
   return ans / num_reads;
 }
-
-/*************************************************************
- ******************** HASHING OF 96bp  ***********************
- *************************************************************/
-
-// bit hashing of sequences of up to 96bp
-struct SmallBPSequence {
- public:
-  size_t sz;
-  bool has_n;
-
-  array <size_t, 3> twobit;
-  bool operator == (const SmallBPSequence &rhs) const {
-    if(sz != rhs.sz)
-      return false;
-
-    for (size_t i = 0; i < 3; ++i)
-      if (twobit[i] != rhs.twobit[i])
-        return false;
-    return true;
-  }
-
-  SmallBPSequence (){
-    twobit.fill(0);
-    sz = 0;
-  }
-
-  SmallBPSequence(string s) {
-    sz = 96;
-    has_n = false;
-    if(s.size() < 96)
-      sz = s.size();
-
-    twobit.fill(0);
-    for (size_t i = 0; i < sz; ++i) {
-      if(s[i] == 'N') {
-        has_n = true;
-        return;
-      }
-
-      if (i < 32) {
-        twobit[0] = ((twobit[0] << 2) | actg_to_2bit(s[i]));
-      } else if (i < 64) {
-        twobit[1] = ((twobit[1] << 2) | actg_to_2bit(s[i]));
-      } else {
-        twobit[2] = ((twobit[2] << 2) | actg_to_2bit(s[i]));
-      }
-    }
-  }
-
-  string to_string() const {
-    if(sz < 32)
-      return size_t_to_seq(twobit[0], sz);
-    else if (sz < 64)
-      return size_t_to_seq(twobit[0],32) + size_t_to_seq(twobit[1], sz - 32);
-
-    return size_t_to_seq(twobit[0],32) + 
-           size_t_to_seq(twobit[1], sz - 32) +
-           size_t_to_seq(twobit[2], sz - 64);
-  }
-};
-
-// Simple hash as the 32bit prefix
-template <>
-struct std::hash <SmallBPSequence> {
-  std::size_t operator() (const SmallBPSequence &k) const {
-    return k.twobit[0];
-  }
-};
-
-
 
 /*************************************************************
  ******************** FASTQ STATS ****************************
@@ -279,7 +201,7 @@ struct FastqStats {
 
   // number of bases for which time optimization will be performed at the cost
   // of memory
-  static const size_t kNumBases = 100;
+  static const size_t kNumBases = 60;
 
   // Value to subtract quality characters to get the actual quality value
   static const size_t kBaseQuality = 33;  // The ascii for the lowest quality
@@ -334,8 +256,8 @@ struct FastqStats {
   // mask to get only the first 2*k bits of the sliding window
   size_t kmer_mask;
 
-  double avg_gc;  // sum of g bases + c bases
-  double total_deduplicated_pct;
+  double avg_gc;  // (sum of g bases + c bases) / (num_reads)
+  double total_deduplicated_pct;  // number of reads left if deduplicated
 
   /************ OVERREPRESENTATION ESTIMTES **********/
   // fraction of the number of slow reads a sequence needs to be seen to be
@@ -404,6 +326,15 @@ struct FastqStats {
   vector<size_t> long_read_length_freq;
   vector<size_t> long_cumulative_read_length_freq;
   vector<size_t> long_tile_position_quality;
+  vector<size_t> long_ldecile, long_lquartile, long_median,
+                 long_uquartile,long_udecile;
+  vector<double> long_mean;
+  vector<double> long_a_pct,
+                 long_c_pct,
+                 long_t_pct,
+                 long_g_pct,
+                 long_n_pct;
+
 
   /********** KMER FREQUENCY ****************/
   // A 2^K + 1 vector to count all possible kmers
@@ -438,20 +369,7 @@ struct FastqStats {
          pass_kmer_content,
          pass_adapter_content;
 
-  
-
-  vector<size_t> long_ldecile, long_lquartile, long_median,
-                 long_uquartile,long_udecile;
-
-  vector<double> long_mean;
-
-  vector<double> long_a_pct,
-                 long_c_pct,
-                 long_t_pct,
-                 long_g_pct,
-                 long_n_pct;
-
-  /**************** FUNCTIONS ****************************/
+    /**************** FUNCTIONS ****************************/
 
   // Default constructor that zeros everything
   explicit FastqStats(const size_t _kmer_size);
@@ -769,7 +687,9 @@ FastqStats::summarize() {
   for (size_t i = 1; i < 99; ++i) 
     if (gc_count[i] == 0)
       gc_count[i] = (gc_count[i+1] + gc_count[i-1])/2;
-  double gc_deviation = sum_deviation_from_normal(gc_count);
+
+  // Calculate pass warn fail statistics
+  cerr << "gc_deviation: " << gc_deviation << "\n";
   if (gc_deviation >= 0.3)
     pass_per_sequence_gc_content = "fail";
   else if (gc_deviation >= 0.15)
@@ -1391,9 +1311,9 @@ FastqReader::process_sequence_base_from_leftover(FastqStats &stats) {
 inline void
 FastqReader::postprocess_sequence_line(FastqStats &stats) {
   // read length frequency histogram
-  if(read_pos <= stats.kNumBases)
+  if((read_pos != 0) && (read_pos <= stats.kNumBases))
     stats.read_length_freq[read_pos - 1]++;
-   else
+  else
     stats.long_read_length_freq[leftover_ind - 1]++;
 
   // Updates maximum read length if applicable
