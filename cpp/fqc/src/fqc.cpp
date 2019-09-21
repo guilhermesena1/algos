@@ -25,6 +25,7 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <sstream>
 
 #include <vector>
 #include <array>
@@ -45,6 +46,7 @@ using std::cerr;
 using std::endl;
 using std::vector;
 using std::array;
+using std::find;
 using std::reverse;
 using std::ostream;
 using std::ofstream;
@@ -57,6 +59,7 @@ using std::ifstream;
 using std::sort;
 using std::max;
 using std::min;
+using std::istringstream;
 
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
@@ -151,7 +154,7 @@ double get_corrected_count (size_t count_at_limit,
 // theoretical normal distribution with same mean and standard deviation
 double 
 sum_deviation_from_normal (const array <size_t, 101> &gc_content) {
-  double mode = 0.0, freq = 0.0, num_reads = 0.0;
+  double mode = 0.0,  num_reads = 0.0;
 
   // Mode and total number of reads (note that we "smoothed" the gc content by
   // filling up the 0 reads, so the number of reads is not the same as the
@@ -190,17 +193,276 @@ sum_deviation_from_normal (const array <size_t, 101> &gc_content) {
 }
 
 /*************************************************************
+ ******************** AUX FUNCTIONS **************************
+ *************************************************************/
+
+// config from options, constants, magic numbers, etc
+struct Config {
+ public:
+  /************************************************************
+   *************** MY UNIVERSAL CONSTANTS *********************
+   ************************************************************/
+  // threshold for a sequence to be considered  poor quality
+  size_t kPoorQualityThreshold;
+
+  /************* DUPLICATION ESTIMATES *************/
+  // Number of unique sequences to see before stopping counting sequences
+  size_t kDupUniqueCutoff;
+
+  // Maximum read length to store the entire read in memory
+  size_t kDupReadMaxSize;
+
+  // Prefix size to cut if read length exceeds the value above
+  size_t kDupReadTruncateSize;
+
+  /************ KMER **********/
+  // fastqc' max number of bases in which kmer counts are distributed
+  size_t kKmerMaxBases;
+ 
+  /************ OVERREPRESENTATION ESTIMTES **********/
+  // fraction of the number of slow reads a sequence needs to be seen to be
+  // considered a candiate for overrepresentation
+
+  double kOverrepMinFrac;
+  /************************************************************
+   *************** FASTQC OPTION PARSER************************
+   ************************************************************/
+  bool casava;  // files from raw casava output
+  bool nanopore;  // fast5 format
+  bool nofilter;  // if running with --casava don't remove read flagged by casava
+  bool extract;  // if set the zipped file will be uncompressed
+  bool nogroup;  // disable grouping of bases for reads >50bp
+  size_t min_length;  // lower limit in sequence length to be shown in report
+  string format;  // force file format
+  size_t threads;  // number of threads to read multiple files in parallel
+  string contaminants_file;  // custom contaminants file
+  string adapters_file;  // adapters file
+  string limits_file;  // file with limits and options and custom analyses
+  size_t kmer_size;  // kmer size
+  bool quiet;
+  string tmpdir;  // dir for temp files when generating report images
+
+  /************************************************************
+   *************** FASTQC LIMITS *******************************
+   ************************************************************/
+  // These will be checked in summary, so hashing is not a probem
+  unordered_map <string, unordered_map <string, double> > limits;
+  static const vector <string> values_to_check;
+
+  /*************** CONTAMINANTS ******************************/
+  vector <pair <string, string> > contaminants;  // first = name, scond = seq
+  vector <pair <string, size_t> > adapters;  // kmer of the adapter prefix
+
+  // IO
+  string filename;
+  string outfile;
+  /*********** FUNCTIONS TO READ FILES *************/
+  Config();  // set magic defaults
+  void read_limits();  // populate limits hash map
+  void read_adapters();
+  void read_contaminants();
+
+  string get_matching_contaminant(string seq) const;
+};
+const vector<string> Config::values_to_check ({
+    "duplication",
+    "kmer",
+    "n_content",
+    "overrepresented",
+    "quality_base",
+    "sequence",
+    "gc_sequence",
+    "quality_sequence",
+    "tile",
+    "sequence_length",
+    "adapter",
+    "duplication",
+    "kmer",
+    "n_content",
+    "overrepresented",
+    "quality_base_lower",
+    "quality_base_median",
+    "sequence",
+    "gc_sequence",
+    "quality_sequence",
+    "tile",
+    "sequence_length",
+    "adapter"
+  });
+// Sets magic numbers
+Config::Config (){
+   kPoorQualityThreshold = 20;
+   kDupUniqueCutoff = 1e5;
+   kDupReadMaxSize = 75;
+   kDupReadTruncateSize = 50;
+   kKmerMaxBases = 500;
+   kOverrepMinFrac = 0.001;
+
+   casava = false;
+   nanopore = false;
+   nofilter = false;
+   extract = false;
+   nogroup = false;
+   min_length = 0;
+   format = "";
+   threads = 1;
+   contaminants_file = "Configuration/contaminant_list.txt";
+   adapters_file = "Configuration/adapter_list.txt";
+   limits_file = "Configuration/limits.txt";
+   kmer_size = 7;
+   quiet = false;
+   tmpdir = ".";
+}
+
+void
+Config::read_limits (){
+  ifstream in (limits_file);
+  if (!in)
+    throw runtime_error ("limits file does not exist: " + limits_file);
+
+  // Variables to parse lines
+  string line, limit, instruction;
+  double value;
+  while(getline (in, line)) {
+
+    // Lines with # are comments and should be skipped
+    if(line[0] != '#') {
+      istringstream iss(line);
+
+      // Every line is a limit, warn/error/ignore and the value
+      iss >> limit >> instruction >> value;
+
+      if (find(values_to_check.begin(), values_to_check.end(), limit) 
+          == values_to_check.end())
+        throw runtime_error ("unknown limit option: " + limit);
+
+      if (instruction != "warn" && 
+          instruction != "error" && 
+          instruction != "ignore")
+        throw runtime_error ("unknown instruction for limit " + limit +
+                             ": " + instruction);
+
+      limits[limit][instruction] = value;
+    }
+  }
+
+  for (auto v : values_to_check) {
+    if(limits.count(v) == 0)
+      throw runtime_error ("instruction for limit " + v +
+                           " not found in file " + limits_file);
+  }
+  in.close();
+}
+
+void 
+Config::read_adapters (){
+  ifstream in (adapters_file);
+  if (!in)
+    throw runtime_error("adapter file not found: " + adapters_file);
+
+  string line, _tmp;
+  vector<string> line_by_space;
+  string adapter_name, adapter_seq;
+  size_t adapter_hash;
+
+  // The contaminants file has a space separated name, and the last instance is
+  // the biological sequence
+  while (getline(in,line)) {
+    if(line[0] != '#'){
+      adapter_name = "";
+      adapter_seq = "";
+      istringstream iss(line);
+      while(iss >> _tmp) {
+        line_by_space.push_back(_tmp);
+      }
+
+      if (line_by_space.size() > 1){
+        for(size_t i = 0; i < line_by_space.size() - 1; ++i)
+          adapter_name += line_by_space[i] + " ";
+        adapter_seq = line_by_space.back();
+
+        if(adapter_seq.size() > kmer_size)
+          adapter_seq = adapter_seq.substr(0, kmer_size);
+
+        adapter_hash = 0;
+        char c;
+        for (size_t i = 0; i < adapter_seq.size(); ++i) {
+          c = adapter_seq[i];
+          if (c != 'A' && c != 'C' && c != 'T' && c != 'G')
+            throw runtime_error("Bad adapter (non-ATGC characters): " 
+                                + adapter_seq);
+
+          adapter_hash = (adapter_hash << 2) | actg_to_2bit(c);
+        }
+        adapters.push_back(make_pair(adapter_name, adapter_hash));
+      }
+
+      line_by_space.clear();
+    }
+  }
+  in.close();
+
+}
+
+void
+Config::read_contaminants(){
+  ifstream in (contaminants_file);
+  if (!in)
+    throw runtime_error("contaminants file not found: " + contaminants_file);
+
+  string line, _tmp;
+  vector<string> line_by_space;
+  string contaminant_name, contaminant_seq;
+
+  // The contaminants file has a space separated name, and the last instance is
+  // the biological sequence
+  while (getline(in,line)) {
+    if(line[0] != '#'){
+      contaminant_name = "";
+      contaminant_seq = "";
+      istringstream iss(line);
+      while(iss >> _tmp) {
+        line_by_space.push_back(_tmp);
+      }
+
+      if (line_by_space.size() > 1){
+        for(size_t i = 0; i < line_by_space.size() - 1; ++i)
+          contaminant_name += line_by_space[i] + " ";
+        contaminant_seq = line_by_space.back();
+        contaminants.push_back(make_pair(contaminant_name,contaminant_seq));
+      }
+
+      line_by_space.clear();
+    }
+  }
+  in.close();
+}
+
+string
+Config::get_matching_contaminant (string seq) const {
+  for (auto v : contaminants) {
+    if (seq.size() > v.second.size()) {
+
+      // contaminant contained in sequence
+      if(seq.find(v.second) != string::npos) {
+        return v.first;
+      }
+    } else {
+      // sequence contained in contaminant
+      if(v.second.find(seq) != string::npos) {
+        return v.first;
+      }
+    }
+  }
+  
+  return "No Hit";
+}
+/*************************************************************
  ******************** FASTQ STATS ****************************
  *************************************************************/
 
 struct FastqStats {
- public:
-  /************************************************************
-   *************** UNIVERSAL CONSTANTS ************************
-   ************************************************************/
-
-  // number of bases for which time optimization will be performed at the cost
-  // of memory
+  // number of bases for static allocation. 
   static const size_t kNumBases = 60;
 
   // Value to subtract quality characters to get the actual quality value
@@ -217,22 +479,8 @@ struct FastqStats {
   // maximum tile value
   static const size_t kNumMaxTiles = 65536;
 
-  // threshold for a sequence to be considered  poor quality
-  static const size_t kPoorQualityThreshold = 20;
 
-  /************* DUPLICATION ESTIMATES *************/
-  // Number of unique sequences to see before stopping counting sequences
-  static const size_t kDupUniqueCutoff = 1e5;
-
-  // Maximum read length to store the entire read in memory
-  static const size_t kDupReadMaxSize = 75;
-
-  // Prefix size to cut if read length exceeds the value above
-  static const size_t kDupReadTruncateSize = 50;
-
-  /************ KMER **********/
-  const size_t kKmerMaxBases = 500;  // fastqc's maximum number of bases
- 
+ public:
   /*********** SINGLE NUMBERS FROM THE ENTIRE FASTQ ****************/
   size_t kBitShiftNucleotide;  // log 2 of value above
   size_t kBitShiftTile;
@@ -250,20 +498,16 @@ struct FastqStats {
   size_t max_read_length;  // total number of lines read
   size_t num_poor;  // reads whose average quality was <= poor
   size_t num_extra_bases;  // number of bases outside of buffer
+
   // Kmer size given as input
   size_t kmer_size;
+  size_t kBitShiftKmer;
 
   // mask to get only the first 2*k bits of the sliding window
   size_t kmer_mask;
 
   double avg_gc;  // (sum of g bases + c bases) / (num_reads)
   double total_deduplicated_pct;  // number of reads left if deduplicated
-
-  /************ OVERREPRESENTATION ESTIMTES **********/
-  // fraction of the number of slow reads a sequence needs to be seen to be
-  // considered a candiate for overrepresentation
-  constexpr static double kOverrepMinFrac = 0.001;
-
 
   /*********************************************************
    *********** METRICS COLLECTED DURING IO *****************
@@ -294,9 +538,8 @@ struct FastqStats {
   array<size_t, kNumBases> read_length_freq;
   array<size_t, kNumBases> cumulative_read_length_freq;
 
-
   /*********** PER TILE SEQUENCE QUALITY OVERSERQUENCES ********/
-  array <size_t, kNumMaxTiles * kNumBases> tile_position_quality;
+  array <double, kNumMaxTiles * kNumBases> tile_position_quality;
   array <size_t, kNumMaxTiles> tile_count;
 
   /*********** SUMMARY ARRAYS **************/
@@ -325,7 +568,7 @@ struct FastqStats {
   vector<size_t> long_position_quality_count;
   vector<size_t> long_read_length_freq;
   vector<size_t> long_cumulative_read_length_freq;
-  vector<size_t> long_tile_position_quality;
+  vector<double> long_tile_position_quality;
   vector<size_t> long_ldecile, long_lquartile, long_median,
                  long_uquartile,long_udecile;
   vector<double> long_mean;
@@ -372,7 +615,7 @@ struct FastqStats {
     /**************** FUNCTIONS ****************************/
 
   // Default constructor that zeros everything
-  explicit FastqStats(const size_t _kmer_size);
+  explicit FastqStats(const Config &config);
 
   // Allocation of more read positions
   inline void allocate_new_base(const bool ignore_tile);
@@ -382,14 +625,14 @@ struct FastqStats {
   // candidate frequent sequences with that given suffix
 
   // Summarize all statistics we need before writing
-  void summarize();
+  void summarize(Config &config);
 
   // Writes to outpute fastqc-style
-  void write(ostream &os, string filename);
+  void write(ostream &os, const Config &config);
 };
 
 // Default constructor
-FastqStats::FastqStats(const size_t _kmer_size) {
+FastqStats::FastqStats(const Config &config) {
   total_bases = 0;
   num_extra_bases = 0;
   avg_read_length = 0;
@@ -417,11 +660,12 @@ FastqStats::FastqStats(const size_t _kmer_size) {
   kBitShiftNucleotide = log2exact(kNumNucleotides);
   kBitShiftQuality = log2exact(kNumQualityValues);
   kBitShiftTile = log2exact(kNumMaxTiles);
-
   // Defines k-mer mask, length and allocates vector
-  kmer_size = _kmer_size;
+  kmer_size = config.kmer_size;
   kmer_mask = (1ll << (2*kmer_size)) - 1;
-  kmer_count = vector<size_t>(min(kNumBases, kKmerMaxBases) * (kmer_mask + 1), 0);
+  kmer_count = vector<size_t>(min(kNumBases, config.kKmerMaxBases) 
+                                  * (kmer_mask + 1), 0);
+  kBitShiftKmer = 2*kmer_size;
 }
 
 // When we read new bases, dynamically allocate new space for their statistics
@@ -446,7 +690,6 @@ FastqStats::allocate_new_base(const bool ignore_tile) {
   // space for tile quality in each position. This takes A LOT of memory so 
   // if tiles are not being considered we will just ignore this
   if(!ignore_tile) {
-
     for (size_t i = 0; i < kNumMaxTiles; ++i)
       long_tile_position_quality.push_back(0);
   }
@@ -457,7 +700,7 @@ FastqStats::allocate_new_base(const bool ignore_tile) {
 
 // Calculates all summary statistics and pass warn fails
 void
-FastqStats::summarize() {
+FastqStats::summarize(Config &config) {
   /******************* BASIC STATISTICS **********************/
   pass_basic_statistics = "pass";  // in fastqc, basic statistics is always pass
   // Average read length
@@ -488,7 +731,7 @@ FastqStats::summarize() {
 
   // Poor quality reads
   num_poor = 0;
-  for (size_t i = 0; i < kPoorQualityThreshold; ++i)
+  for (size_t i = 0; i < config.kPoorQualityThreshold; ++i)
     num_poor += quality_count[i];
 
   // Cumulative read length frequency
@@ -574,7 +817,6 @@ FastqStats::summarize() {
       counts += cur;
     }
 
-
     // Normalize mean
     if (i < kNumBases)
       cur_mean = cur_mean / cumulative_read_length_freq[i];
@@ -599,14 +841,14 @@ FastqStats::summarize() {
 
     // Pass warn fail criteria
     if (pass_per_base_sequence_quality != "fail") {
-      if (cur_lquartile < 5)
+      if (cur_lquartile < config.limits["quality_base_lower"]["error"])
         pass_per_base_sequence_quality = "fail";
-      else if (cur_lquartile < 10)
+      else if (cur_lquartile < config.limits["quality_base_lower"]["warn"])
         pass_per_base_sequence_quality = "warn";
 
-      if (cur_median < 20)
+      if (cur_median < config.limits["quality_base_median"]["error"])
         pass_per_base_sequence_quality = "fail";
-      else if (cur_median < 25)
+      else if (cur_median < config.limits["quality_base_median"]["warn"])
         pass_per_base_sequence_quality = "warn";
     }
   }
@@ -623,10 +865,10 @@ FastqStats::summarize() {
     }
   }
 
-  if (mode_ind < 27)
+  if (mode_ind < config.limits["quality_sequence"]["warn"])
     pass_per_sequence_quality_scores = "warn";
 
-  else if (mode_ind < 20)
+  else if (mode_ind < config.limits["quality_sequence"]["error"])
     pass_per_sequence_quality_scores = "fail";
 
   /******************* PER BASE SEQUENCE CONTENT **********************/
@@ -674,9 +916,9 @@ FastqStats::summarize() {
     max_diff = max(max_diff, fabs(t-g));
 
     if (pass_per_base_sequence_content != "fail") {
-      if (max_diff > 0.2)
+      if (max_diff > config.limits["sequence"]["error"] / 100.0)
         pass_per_base_sequence_content = "fail";
-      else if (max_diff > 0.1)
+      else if (max_diff > config.limits["sequence"]["warn"] / 100.0)
         pass_per_base_sequence_content = "warn";
     }
   }
@@ -689,10 +931,10 @@ FastqStats::summarize() {
       gc_count[i] = (gc_count[i+1] + gc_count[i-1])/2;
 
   // Calculate pass warn fail statistics
-  cerr << "gc_deviation: " << gc_deviation << "\n";
-  if (gc_deviation >= 0.3)
+  double gc_deviation = sum_deviation_from_normal(gc_count);
+  if (gc_deviation >= config.limits["gc_sequence"]["error"])
     pass_per_sequence_gc_content = "fail";
-  else if (gc_deviation >= 0.15)
+  else if (gc_deviation >= config.limits["gc_sequence"]["warn"])
     pass_per_sequence_gc_content = "warn";
 
   /******************* PER BASE N CONTENT **********************/
@@ -706,9 +948,9 @@ FastqStats::summarize() {
       else
         cur_n_pct = long_n_pct[i - kNumBases];
 
-      if (cur_n_pct > 20.0) {
+      if (cur_n_pct > config.limits["n_content"]["error"]) {
         pass_per_base_n_content = "fail";
-      } else if (cur_n_pct > 10.0)
+      } else if (cur_n_pct > config.limits["n_content"]["warn"])
         pass_per_base_n_content = "warn";
     }
   }
@@ -722,24 +964,29 @@ FastqStats::summarize() {
   else
     freq_of_avg = long_read_length_freq[avg_read_length - kNumBases];
 
-  if (freq_of_avg != num_reads)
-    pass_sequence_length_distribution = "warn";
-  if (read_length_freq[0] > 0)
-    pass_sequence_length_distribution = "fail";
+  if (config.limits["sequence_length"]["error"] == 1) {
+    if (freq_of_avg != num_reads)
+      pass_sequence_length_distribution = "warn";
+    if (read_length_freq[0] > 0)
+      pass_sequence_length_distribution = "fail";
+  }
 
   /************** DUPLICATE SEQUENCES **************************/
   pass_duplicate_sequences = "pass";
 
   double seq_total = 0.0;
   double seq_dedup = 0.0;
-  unordered_map <size_t, size_t> counts_by_freq;
 
+  // Key is frequenccy (r), value is number of times we saw a sequence
+  // with that frequency
+  unordered_map <size_t, size_t> counts_by_freq;
   for (auto v : sequence_count) {
     if(counts_by_freq.count(v.second) == 0)
       counts_by_freq[v.second] = 0;
     counts_by_freq[v.second]++;
   }
 
+  // Now we run the fastqc corrected extrapolation
   for (auto v: counts_by_freq) {
     counts_by_freq[v.first] = get_corrected_count (count_at_limit, 
                                                              num_reads, 
@@ -747,6 +994,7 @@ FastqStats::summarize() {
                                                              v.second);
   }
 
+  // Group in blocks similarly to fastqc
   for (auto v : counts_by_freq) {
     size_t dup_slot = v.first - 1;
     if (v.first >= 10000) dup_slot = 15;
@@ -764,6 +1012,7 @@ FastqStats::summarize() {
     seq_dedup += v.second;
   }
 
+  // "Sequence duplication estimate" in the summary
   total_deduplicated_pct = 100.0 * seq_dedup / seq_total;
 
   // Convert to percentage
@@ -776,9 +1025,9 @@ FastqStats::summarize() {
 
   // pass warn fail criteria : unique reads must be >80% 
   // (otherwise warn) or >50% (otherwisefail)
-  if (percentage_total[0] <= 50)
+  if (percentage_total[0] <= config.limits["duplication"]["error"])
     pass_duplicate_sequences = "fail";
-  else if (percentage_total[0] <= 80)
+  else if (percentage_total[0] <= config.limits["duplication"]["warn"])
     pass_duplicate_sequences = "warn";
 
   /************** OVERREPRESENTED SEQUENCES ********************/
@@ -786,7 +1035,7 @@ FastqStats::summarize() {
 
   // Keep only sequences that pass the input cutoff
   for (auto it = sequence_count.begin(); it != sequence_count.end(); ++it) {
-    if (it->second > num_reads * kOverrepMinFrac)
+    if (it->second > num_reads * config.kOverrepMinFrac)
       overrep_sequences.push_back (make_pair(it->first, 
                                               it->second));
   }
@@ -804,18 +1053,56 @@ FastqStats::summarize() {
   pass_kmer_content = "pass";
 
   /************** PER TILE SEQUENCE QUALITY ********************/
+  pass_per_tile_sequence_quality = "pass";
+
+  // Normalize by average: We can reuse the mean we calculated in per base
+  // quality distributions above. 
+  size_t tile_ind;
+  for(size_t i = 0; i < max_read_length; ++i) {
+    for (size_t j = 0; j < kNumMaxTiles; ++j) {
+      if(tile_count[j] > 0){
+        if (i < kNumBases) {
+          tile_ind = (i << kBitShiftTile) | j;
+          tile_position_quality[tile_ind] = 
+          tile_position_quality[tile_ind] / tile_count[j] - mean[i];
+
+          if(pass_per_tile_sequence_quality != "fail") {
+            if (tile_position_quality[tile_ind] <= config.limits["tile"]["error"])
+              pass_per_tile_sequence_quality = "fail";
+
+            else if (tile_position_quality[tile_ind] <= config.limits["tile"]["warn"])
+              pass_per_tile_sequence_quality = "warn";
+          }
+        }
+        else {
+          tile_ind = ((i - kNumBases) << kBitShiftTile) | j;
+          long_tile_position_quality[tile_ind] = 
+          (long_tile_position_quality[tile_ind] / tile_count[j]) - long_mean[i - kNumBases];
+
+          if(pass_per_tile_sequence_quality != "fail") {
+            if (long_tile_position_quality[tile_ind] <= 
+                -config.limits["tile"]["error"])
+              pass_per_tile_sequence_quality = "fail";
+            else if (long_tile_position_quality[tile_ind] <= 
+                -config.limits["tile"]["warn"])
+              pass_per_tile_sequence_quality = "warn";
+          }
+        }
+      }
+    }
+  }
 }
 
 /****************** WRITE STATS ***********************/
 void
-FastqStats::write(ostream &os, string filename) {
+FastqStats::write(ostream &os, const Config &config) {
   // Header
   os << "##FastQC\t0.11.8\n";
 
   // Basic statistics
   os << ">>Basic Statistics\t" << pass_basic_statistics << "\n";
   os << "#Measure\tValue\n";
-  os << "Filename\t" << filename << "\n";
+  os << "Filename\t" << strip_path (config.filename) << "\n";
   os << "File type\tConventional base calls\n";
   os << "Total Sequences\t" << num_reads << "\n";
   os << "Sequences flagged as poor quality \t" << num_poor << "\n";
@@ -889,16 +1176,20 @@ FastqStats::write(ostream &os, string filename) {
   os << ">>Per tile sequence quality\t" <<
         pass_per_tile_sequence_quality << "\n";
 
-  size_t tile_pos_ind;
+  size_t tile_ind;
   for (size_t i = 0; i < kNumMaxTiles; ++i) {
     if (tile_count[i] > 0) {
-      for (size_t j = 0; j < kNumBases; ++j) {
-        tile_pos_ind = (j << kBitShiftTile) | i;
-        if(tile_position_quality[tile_pos_ind] > 0) {
+      for (size_t j = 0; j < max_read_length; ++j) {
+        if (j < kNumBases) {
+          tile_ind = (j << kBitShiftTile) | i;
           os << i << "\t" << j + 1 << "\t" << 
-            tile_position_quality[tile_pos_ind] / 
-            static_cast<double>(tile_count[i]) << "\n";
+            tile_position_quality[tile_ind];
+        } else {
+          tile_ind = ((j - kNumBases) << kBitShiftTile) | i;
+          os << i << "\t" << j + 1 << "\t" << 
+            long_tile_position_quality[tile_ind];
         }
+        os << "\n";
       }
     }
   }
@@ -978,12 +1269,42 @@ FastqStats::write(ostream &os, string filename) {
 
   for (auto seq : overrep_sequences)
       os << seq.first << "\t" << seq.second <<  "\t" <<
-        100.0 * seq.second / num_reads << "\t???\n";
+        100.0 * seq.second / num_reads << "\t"
+        << config.get_matching_contaminant(seq.first) << "\n";
   os << ">>END_MODULE\n";
   os << ">>Adapter Content\t" << pass_adapter_content << "\n";
+
+  os << "#Position\t";
+  for (auto v : config.adapters)
+    os << v.first << "\t";
+
+  os << "\n";
+
+  // Number of kmers counted
+  double divide_by = 0.0;
+  size_t jj;
+  for(size_t i = kmer_size; i < kNumBases; ++i)
+    divide_by += (i - kmer_size + 1) * read_length_freq[i];
+
+  vector <double> kmer_by_base(config.adapters.size(), 0.0);
+  for (size_t i = 0; i < kNumBases; ++i) {
+    if (cumulative_read_length_freq[i] > 0) {
+      os << i + 1 << "\t";
+      jj = 0;
+      for (auto v : config.adapters) {
+        size_t kmer_ind = (i << kBitShiftKmer) | v.second;
+        kmer_by_base[jj] += kmer_count[kmer_ind];
+        os << 100.0 * kmer_by_base[jj] / divide_by;
+        ++jj;
+
+        if(jj != config.adapters.size())
+          os << " ";
+      }
+        os << "\n";
+    }
+  }
   os << ">>END_MODULE\n";
 }
-
 
 /*************************************************************
  ******************** FASTQ READER ***************************
@@ -995,6 +1316,9 @@ struct FastqReader{
   char *curr;  // current position in file
   char *last;  // last position in file
   struct stat st;
+
+  // config on how to handle reads
+  Config config;
 
   // buffer size to store line 2 of each read
   size_t buffer_size;
@@ -1061,14 +1385,19 @@ struct FastqReader{
   inline void read_sequence_line(FastqStats &stats);  // parse sequence
   inline void read_quality_line(FastqStats &stats);  // parse quality
 
-  explicit FastqReader(const size_t buffer_size);
+  explicit FastqReader(const Config _config,
+                       const size_t buffer_size);
+
   void memorymap(const string &filename,
-                 const bool VERBOSE);
+                 const bool quiet);
   void memoryunmap();
   inline bool operator >> (FastqStats &stats);
 };
 
-FastqReader::FastqReader(const size_t _buffer_size) {
+FastqReader::FastqReader(const Config _config,
+                         const size_t _buffer_size) {
+
+  config = _config;
   buffer_size = _buffer_size;
 
   // Allocates buffer to temporarily store reads
@@ -1084,7 +1413,7 @@ FastqReader::FastqReader(const size_t _buffer_size) {
 // Open file
 void
 FastqReader::memorymap(const string &filename,
-                       const bool VERBOSE) {
+                       const bool quiet) {
   int fd = open(filename.c_str(), O_RDONLY, 0);
   if (fd == -1)
     throw runtime_error("failed to open fastq file: " + filename);
@@ -1098,7 +1427,7 @@ FastqReader::memorymap(const string &filename,
   if (mmap_data == MAP_FAILED)
     throw runtime_error("failed to mmap fastq file: " + filename);
 
-  if (VERBOSE) {
+  if (!quiet) {
     // Display fastq size
     cerr << "Fastq file size: ";
     if (st.st_size > (1ll << 40))
@@ -1267,12 +1596,13 @@ FastqReader::process_sequence_base_from_buffer(FastqStats &stats) {
     stats.base_count[(read_pos << stats.kBitShiftNucleotide) | base_ind]++;
 
     if (is_kmer_line(stats)) {
-      if (read_pos < stats.kKmerMaxBases) {
+      if (read_pos < config.kKmerMaxBases) {
         cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
 
         // registers k-mer if we've seen at least k nucleotides since the last n
         if (num_bases_after_n == stats.kmer_size) {
-          stats.kmer_count[(read_pos << stats.kmer_size) | (cur_kmer & stats.kmer_mask)]++;
+          stats.kmer_count[(read_pos << stats.kBitShiftKmer) 
+                         | (cur_kmer & stats.kmer_mask)]++;
         }
 
         else
@@ -1375,8 +1705,6 @@ FastqReader::read_sequence_line(FastqStats &stats){
   // statistics summarized after the read
   postprocess_sequence_line(stats);
 }
-
-
 /*******************************************************/
 /*************** QUALITY PROCESSING ********************/
 /*******************************************************/
@@ -1487,21 +1815,23 @@ FastqReader::read_quality_line(FastqStats &stats){
 /*************** THIS IS VERY SLOW ********************/
 inline void
 FastqReader::postprocess_fastq_record(FastqStats &stats) {
-  if(read_pos <= stats.kDupReadMaxSize)
+
+  // if reads are >75pb, truncate to 50
+  if(read_pos <= config.kDupReadMaxSize)
     sequence_to_hash = buffer.substr(0, read_pos);
   else
-    sequence_to_hash = buffer.substr(0, stats.kDupReadTruncateSize);
+    sequence_to_hash = buffer.substr(0, config.kDupReadTruncateSize);
 
   // New sequence found 
   if(stats.sequence_count.count(sequence_to_hash) == 0) {
-    if (stats.num_unique_seen != stats.kDupUniqueCutoff) {
+    if (stats.num_unique_seen != config.kDupUniqueCutoff) {
       stats.sequence_count.insert({{sequence_to_hash, 1}});
       stats.count_at_limit = stats.num_reads;
       ++stats.num_unique_seen;
     }
   } else {
     stats.sequence_count[sequence_to_hash]++;
-    if (stats.num_unique_seen < stats.kDupUniqueCutoff)
+    if (stats.num_unique_seen < config.kDupUniqueCutoff)
       stats.count_at_limit = stats.num_reads;
   }
 
@@ -1539,29 +1869,65 @@ FastqReader::operator >> (FastqStats &stats) {
 int main(int argc, const char **argv) {
   clock_t begin = clock();  // register ellapsed time
   /****************** COMMAND LINE OPTIONS ********************/
-  string filename;  // fastq file
-  string outfile;  // optional filename to save
-  bool VERBOSE = false;  // print more run info
-
   // file containing contaminants to be checked for
-  string contaminants_file = "misc/contaminants.tsv";
 
   // Length of k-mers to count. Grows memory exponentially so it is bound to 10
-  size_t kmer_size = 7;
   const size_t MAX_KMER_SIZE = 10;
-
+  bool help = false;
+  bool version = false;
+  Config config;
   OptionParser opt_parse(strip_path(argv[0]),
-                         "Quality control metrics for fastq files",
-                         "<fastq-file>");
+                         "A high throughput sequence QC analysis tool",
+                         "seqfile1 seqfile2 ... seqfileN");
 
-  opt_parse.add_opt("kmer", 'k',
-                    "k-mer size (default = 7, max = 10)", false, kmer_size);
+  opt_parse.add_opt("-help", 'h', "print this help file adn exit", 
+                     false, help);
+  
+  opt_parse.add_opt("-version", 'v', "print the version of the program and exit", 
+                     false, version);
 
-  opt_parse.add_opt("outfile", 'o',
+  opt_parse.add_opt("-outfile", 'o',
                     "filename to save results (default = stdout)",
-                    false, outfile);
+                    false, config.outfile);
 
-  opt_parse.add_opt("verbose", 'v', "print more run info", false, VERBOSE);
+  opt_parse.add_opt("-casava", 'C',
+                    "Files come from raw casava output (currently ignored)",
+                    false, config.casava);
+
+  opt_parse.add_opt("-nano", 'n',
+                    "Files come from fast5 nanopore sequences",
+                    false, config.nanopore);
+
+  opt_parse.add_opt("-nofilter", 'F',
+                    "If running with --casava do not remove poor quality sequences",
+                    false, config.nofilter);
+
+  opt_parse.add_opt("-noextract", 'e',
+                    "If running with --casava do not remove poor quality sequences",
+                    false, config.casava);
+
+  opt_parse.add_opt("-nogroup", 'g',
+                    "Disable grouping of bases for reads >50bp",
+                    false, config.nogroup);
+
+  opt_parse.add_opt("-format", 'f',
+                    "Force file format",
+                    false, config.format);
+
+
+  opt_parse.add_opt("-threads", 't',
+                    "Specifies number of simultaneous files ",
+                    false, config.threads );
+
+  opt_parse.add_opt("-kmer", 'k',
+                    "k-mer size (default = 7, max = 10)", false, 
+                    config.kmer_size);
+
+
+  opt_parse.add_opt("-quiet", 'q', "print more run info", false, config.quiet);
+
+
+
   vector<string> leftover_args;
 
   opt_parse.parse(argc, argv, leftover_args);
@@ -1584,35 +1950,42 @@ int main(int argc, const char **argv) {
     return EXIT_SUCCESS;
   }
 
-  if (kmer_size > MAX_KMER_SIZE) {
+  if (config.kmer_size > MAX_KMER_SIZE) {
     cerr << "K-mer size should not exceed << " << MAX_KMER_SIZE << "\n";
     cerr << opt_parse.help_message() << endl;
     return EXIT_SUCCESS;
   }
 
-  if (kmer_size < 2) {
+  if (config.kmer_size < 2) {
     cerr << "K-mer size should be larger than 2\n";
     cerr << opt_parse.help_message() << endl;
     return EXIT_SUCCESS;
   }
-  filename = leftover_args.front();
+  config.filename = leftover_args.front();
 
   /****************** END COMMAND LINE OPTIONS *****************/
-  if (VERBOSE)
-    cerr << "Started reading file " << filename << ".\n";
+  
+  /****************** BEGIN PROCESSING CONFIG ******************/
+  config.read_limits();
+  config.read_adapters();
+  config.read_contaminants();
+
+  /****************** END PROCESSING CONFIG *******************/
+  if (!config.quiet)
+    cerr << "Started reading file " << config.filename << ".\n";
 
   // Allocates vectors to summarize data
-  FastqStats stats(kmer_size);
+  FastqStats stats(config);
 
   // Initializes a reader given the maximum number of bases to summarie
-  FastqReader in (stats.kNumBases);
-  in.memorymap(filename, VERBOSE);
+  FastqReader in (config, stats.kNumBases);
+  in.memorymap(config.filename, config.quiet);
 
   // Read record by record
   const size_t num_reads_to_log = 1000000;
   size_t next_read = num_reads_to_log;
   while (in >> stats) {
-    if(VERBOSE)
+    if(!config.quiet)
       // Equality is faster than modular arithmetics
       if (stats.num_reads == next_read) {
         cerr << "Processed " << stats.num_reads / num_reads_to_log
@@ -1623,30 +1996,30 @@ int main(int argc, const char **argv) {
 
   // Free memory
   in.memoryunmap();
-  if (VERBOSE)
+  if (!config.quiet)
     cerr << "Finished reading file.\n";
 
-  if (VERBOSE)
+  if (!config.quiet)
     cerr << "Summarizing data.\n";
 
   // This function has to be called before writing to output
-   stats.summarize();
+   stats.summarize(config);
 
   /************************ WRITE TO OUTPUT *****************************/
-  if (VERBOSE)
+  if (!config.quiet)
     cerr << "Writing data.\n";
 
   // define output
   ofstream of;
-  if (!outfile.empty())
-    of.open(outfile.c_str(), ofstream::binary);
+  if (!config.outfile.empty())
+    of.open(config.outfile.c_str(), ofstream::binary);
 
-  ostream os(outfile.empty() ? cout.rdbuf() : of.rdbuf());
+  ostream os(config.outfile.empty() ? cout.rdbuf() : of.rdbuf());
 
   // Write
-  stats.write(os, filename);
+  stats.write(os, config);
   /************** TIME SUMMARY *********************************/
-  if (VERBOSE)
+  if (!config.quiet)
     cerr << "Elapsed time: "
          << (clock() - begin) / CLOCKS_PER_SEC
          << " seconds\n";
