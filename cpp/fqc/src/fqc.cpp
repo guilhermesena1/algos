@@ -60,6 +60,7 @@ using std::sort;
 using std::max;
 using std::min;
 using std::istringstream;
+using std::ostringstream;
 
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
@@ -988,10 +989,10 @@ FastqStats::summarize(Config &config) {
 
   // Now we run the fastqc corrected extrapolation
   for (auto v: counts_by_freq) {
-    counts_by_freq[v.first] = get_corrected_count (count_at_limit, 
-                                                             num_reads, 
-                                                             v.first, 
-                                                             v.second);
+    counts_by_freq[v.first] = get_corrected_count (count_at_limit,
+                                                   num_reads,
+                                                   v.first,
+                                                   v.second);
   }
 
   // Group in blocks similarly to fastqc
@@ -1023,10 +1024,11 @@ FastqStats::summarize(Config &config) {
   for (auto &v : percentage_total)
     v = 100.0 * v / seq_total;  // Percentage of sequences in bin
 
-  // pass warn fail criteria : unique reads must be >80% 
+  // pass warn fail criteria : unique reads must be >80%
   // (otherwise warn) or >50% (otherwisefail)
   if (percentage_total[0] <= config.limits["duplication"]["error"])
     pass_duplicate_sequences = "fail";
+
   else if (percentage_total[0] <= config.limits["duplication"]["warn"])
     pass_duplicate_sequences = "warn";
 
@@ -1036,12 +1038,12 @@ FastqStats::summarize(Config &config) {
   // Keep only sequences that pass the input cutoff
   for (auto it = sequence_count.begin(); it != sequence_count.end(); ++it) {
     if (it->second > num_reads * config.kOverrepMinFrac)
-      overrep_sequences.push_back (make_pair(it->first, 
-                                              it->second));
+      overrep_sequences.push_back (make_pair(it->first,
+                                             it->second));
   }
 
   // Sort strings by frequency
-  sort(overrep_sequences.begin(), overrep_sequences.end(), 
+  sort(overrep_sequences.begin(), overrep_sequences.end(),
        [](auto &a, auto &b){
           return a.second > b.second;
           });
@@ -1056,14 +1058,14 @@ FastqStats::summarize(Config &config) {
   pass_per_tile_sequence_quality = "pass";
 
   // Normalize by average: We can reuse the mean we calculated in per base
-  // quality distributions above. 
+  // quality distributions above.
   size_t tile_ind;
   for(size_t i = 0; i < max_read_length; ++i) {
     for (size_t j = 0; j < kNumMaxTiles; ++j) {
       if(tile_count[j] > 0){
         if (i < kNumBases) {
           tile_ind = (i << kBitShiftTile) | j;
-          tile_position_quality[tile_ind] = 
+          tile_position_quality[tile_ind] =
           tile_position_quality[tile_ind] / tile_count[j] - mean[i];
 
           if(pass_per_tile_sequence_quality != "fail") {
@@ -1076,14 +1078,14 @@ FastqStats::summarize(Config &config) {
         }
         else {
           tile_ind = ((i - kNumBases) << kBitShiftTile) | j;
-          long_tile_position_quality[tile_ind] = 
+          long_tile_position_quality[tile_ind] =
           (long_tile_position_quality[tile_ind] / tile_count[j]) - long_mean[i - kNumBases];
 
           if(pass_per_tile_sequence_quality != "fail") {
-            if (long_tile_position_quality[tile_ind] <= 
+            if (long_tile_position_quality[tile_ind] <=
                 -config.limits["tile"]["error"])
               pass_per_tile_sequence_quality = "fail";
-            else if (long_tile_position_quality[tile_ind] <= 
+            else if (long_tile_position_quality[tile_ind] <=
                 -config.limits["tile"]["warn"])
               pass_per_tile_sequence_quality = "warn";
           }
@@ -1862,6 +1864,63 @@ FastqReader::operator >> (FastqStats &stats) {
 
 }
 
+/*******************************************************/
+/*************** HTML FACTORY***** *********************/
+/*******************************************************/
+struct HTMLFactory {
+  public:
+    string sourcecode;
+    explicit HTMLFactory (string filepath);
+    void make_position_quality_data(const FastqStats &stats);
+};
+
+HTMLFactory::HTMLFactory (string filepath) {
+  sourcecode ="";
+  ifstream in(filepath);
+  if(!in)
+    throw runtime_error ("HTML layout not found: " + filepath);
+  string line;
+
+  // pass the whole source code to a string
+  while (getline(in, line))
+    sourcecode += line + "\n";
+}
+
+void 
+HTMLFactory::make_position_quality_data (const FastqStats &stats) {
+  ostringstream data;
+  const string placeholder = "{{\"SEQBASEQUALITYDATA\"}}";
+  size_t max_bases_to_report = 100;
+  size_t limit = min(stats.max_read_length, max_bases_to_report);
+  for (size_t i = 0; i < limit; ++i) {
+    // TODO (gui): see how fastqc handles large datasets
+    if (i < 100) {
+      data << "{y : [" 
+           << stats.ldecile[i] << ", "
+           << stats.lquartile[i] << ", "
+           << stats.median[i] << ", "
+           << stats.uquartile[i] << ", "
+           << stats.udecile[i] << "], ";
+      data << "type : 'box', marker : {color : '";
+      if(stats.median[i] > 30)
+        data << "green";
+      else if (stats.median[i] > 20)
+        data << "yellow";
+      else
+        data << "red";
+      data << "'}}";
+
+      if (i < limit - 1)
+        data << ", ";
+    }
+  }
+
+  auto pos = sourcecode.find(placeholder);
+  if (pos == string::npos)
+    throw runtime_error ("placeholder for quality base data not found");
+
+  sourcecode.replace(pos, placeholder.size(), data.str());
+}
 /******************************************************
  ********************* MAIN ***************************
  ******************************************************/
@@ -1914,10 +1973,21 @@ int main(int argc, const char **argv) {
                     "Force file format",
                     false, config.format);
 
-
   opt_parse.add_opt("-threads", 't',
                     "Specifies number of simultaneous files ",
                     false, config.threads );
+
+  opt_parse.add_opt("-contaminants", 'c',
+                    "Non-default filer with a list of contaminants",
+                    false, config.contaminants_file);
+
+  opt_parse.add_opt("-adapters", 'a',
+                    "Non-default file with a list of adapters",
+                    false, config.contaminants_file);
+
+  opt_parse.add_opt("-limits", 'l',
+                    "Non-default file with limits and warn/fail criteria",
+                    false, config.contaminants_file);
 
   opt_parse.add_opt("-kmer", 'k',
                     "k-mer size (default = 7, max = 10)", false, 
@@ -1925,8 +1995,8 @@ int main(int argc, const char **argv) {
 
 
   opt_parse.add_opt("-quiet", 'q', "print more run info", false, config.quiet);
-
-
+  opt_parse.add_opt("-dir", 'd', "directory in which to create temp files", 
+                     false, config.quiet);
 
   vector<string> leftover_args;
 
@@ -1964,7 +2034,7 @@ int main(int argc, const char **argv) {
   config.filename = leftover_args.front();
 
   /****************** END COMMAND LINE OPTIONS *****************/
-  
+
   /****************** BEGIN PROCESSING CONFIG ******************/
   config.read_limits();
   config.read_adapters();
@@ -2018,6 +2088,14 @@ int main(int argc, const char **argv) {
 
   // Write
   stats.write(os, config);
+
+  /************************ WRITE TO HTML *****************************/
+  HTMLFactory factory ("html/template.html");
+  factory.make_position_quality_data (stats);
+  ofstream html (config.outfile + ".html");
+  html << factory.sourcecode;
+  html.close();
+
   /************** TIME SUMMARY *********************************/
   if (!config.quiet)
     cerr << "Elapsed time: "
