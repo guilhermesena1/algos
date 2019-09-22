@@ -587,6 +587,9 @@ struct FastqStats {
   // A 2^K + 1 vector to count all possible kmers
   vector<size_t> kmer_count;
 
+  /********** ADAPTER COUNT *****************/
+  // Percentage of times we saw each adapter in each position
+  unordered_map <size_t, vector <double>> kmer_by_base;
   /*********** DUPLICATION ******************/
   unordered_map <string, size_t> sequence_count;
 
@@ -1060,7 +1063,45 @@ FastqStats::summarize(Config &config) {
   /************** ADAPTER CONTENT ******************************/
   pass_adapter_content = "pass";
 
+  // Cumulative count of kmers by position
+  size_t jj;
+  for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
+    if (cumulative_read_length_freq[i] > 0) {
 
+      // Makes the count of kmers by position cumulative by copying
+      // the previous position count
+      if (i == 0)
+        kmer_by_base[i] = vector<double> (config.adapters.size(), 0.0);
+      else
+        kmer_by_base[i] = vector<double> (kmer_by_base[i-1].begin(),
+                                          kmer_by_base[i-1].end());
+      jj = 0;
+
+      // Get count for adapter's k-prefix 
+      for (auto v : config.adapters) {
+        size_t kmer_ind = (i << kBitShiftKmer) | v.second;
+        kmer_by_base[i][jj] += kmer_count[kmer_ind];
+        ++jj;
+      }
+    }
+  }
+
+
+  for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
+    if (cumulative_read_length_freq[i] > 0) {
+      jj = 0;
+      for (auto v : config.adapters) {
+        kmer_by_base[i][jj] = kmer_by_base[i][jj] * 100.0 / num_reads;
+        if (pass_adapter_content != "fail") {
+          if (kmer_by_base[i][jj] > config.limits["adapter"]["error"])
+            pass_adapter_content = "fail";
+          else if (kmer_by_base[i][jj] > config.limits["adapter"]["warn"])
+            pass_adapter_content = "warn";
+        }
+        ++jj;
+      }
+    }
+  }
   /************** KMER CONTENT *********************************/
   pass_kmer_content = "pass";
 
@@ -1293,20 +1334,13 @@ FastqStats::write(ostream &os, const Config &config) {
   os << "\n";
 
   // Number of kmers counted
-  double divide_by = 0.0;
   size_t jj;
-  for(size_t i = kmer_size; i < kNumBases; ++i)
-    divide_by += (i - kmer_size + 1) * read_length_freq[i];
-
-  vector <double> kmer_by_base(config.adapters.size(), 0.0);
   for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
     if (cumulative_read_length_freq[i] > 0) {
       os << i + 1 << "\t";
       jj = 0;
       for (auto v : config.adapters) {
-        size_t kmer_ind = (i << kBitShiftKmer) | v.second;
-        kmer_by_base[jj] += kmer_count[kmer_ind];
-        os << 100.0 * kmer_by_base[jj] / divide_by;
+        os << 100.0 * kmer_by_base[i][jj];
         ++jj;
 
         if(jj != config.adapters.size())
@@ -1903,7 +1937,11 @@ struct HTMLFactory {
 
   void make_sequence_duplication_data(const FastqStats &stats,
                                       const Config &config);
-    
+
+  void make_overrepresented_sequences_data(const FastqStats &stats,
+                                           const Config &config);
+
+
 };
 
 HTMLFactory::HTMLFactory (string filepath) {
@@ -2040,22 +2078,22 @@ HTMLFactory::make_base_sequence_content_data (const FastqStats &stats,
     // Y values: frequency with which they were seen
     data << "], y : [";
     for (size_t i = 0; i < stats.max_read_length; ++i) {
-      if (base == 0)
+      if (base == 0) {
         if (i < stats.kNumBases) data << stats.a_pct[i];
         else data << stats.long_a_pct[i - stats.kNumBases];
-
-      if (base == 1)
+      }
+      if (base == 1) {
         if (i < stats.kNumBases) data << stats.c_pct[i];
         else data << stats.long_c_pct[i - stats.kNumBases];
-
-      if (base == 2)
+      }
+      if (base == 2) {
         if (i < stats.kNumBases) data << stats.t_pct[i];
         else data << stats.long_t_pct[i - stats.kNumBases];
-
-      if (base == 3)
+      }
+      if (base == 3) {
         if (i < stats.kNumBases) data << stats.g_pct[i];
         else data << stats.long_g_pct[i - stats.kNumBases];
-
+      }
       if (i < stats.max_read_length - 1)
         data << ", ";
     }
@@ -2200,6 +2238,34 @@ HTMLFactory::make_sequence_duplication_data (const FastqStats &stats,
 }
 
 
+void 
+HTMLFactory::make_overrepresented_sequences_data(const FastqStats &stats,
+                                                 const Config &config) {
+  string placeholder = "{{OVERREPSEQDATA}}";
+  ostringstream data;
+
+  // Header
+  data << "<table><thead><tr>";
+  data << "<th>Sequence</th>";
+  data << "<th>Count</th>";
+  data << "<th>Percentage</th>";
+  data << "<th>Possible Source</th>";
+  data << "</tr></thead><tbody>";
+
+  // All overrep sequences
+  for (auto v : stats.overrep_sequences) {
+    data << "<tr><td>" << v.first << "</td>";
+    data << "<td>" << v.second << "</td>";
+    data << "<td>" << 100.0 * v.second / stats.num_reads << "</td>";
+    data << "<td>" << config.get_matching_contaminant(v.first)
+        << "</td>";
+
+    data << "</tr>";
+  }
+  data << "</tbody></table>";
+
+  replace_placeholder_with_data (placeholder, data.str());
+}
 
 
 /******************************************************
@@ -2381,6 +2447,7 @@ int main(int argc, const char **argv) {
   factory.make_sequence_gc_content_data (stats, config);
   factory.make_base_n_content_data (stats, config);
   factory.make_sequence_duplication_data (stats, config);
+  factory.make_overrepresented_sequences_data (stats, config);
   ofstream html (config.outfile + ".html");
   html << factory.sourcecode;
   html.close();
