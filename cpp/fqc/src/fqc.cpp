@@ -64,7 +64,7 @@ using std::ostringstream;
 
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
- *************************************************************/
+ *************************g***********************************/
 
 // converts 64 bit integer to a sequence string by reading 2 bits at a time and
 // converting back to ACTG
@@ -154,7 +154,8 @@ double get_corrected_count (size_t count_at_limit,
 // Function to calculate the deviation of a histogram with 100 bins from a
 // theoretical normal distribution with same mean and standard deviation
 double 
-sum_deviation_from_normal (const array <size_t, 101> &gc_content) {
+sum_deviation_from_normal (const array <size_t, 101> &gc_content,
+                           array <double, 101> &theoretical) {
   double mode = 0.0,  num_reads = 0.0;
 
   // Mode and total number of reads (note that we "smoothed" the gc content by
@@ -175,7 +176,7 @@ sum_deviation_from_normal (const array <size_t, 101> &gc_content) {
   // theoretical sampling from a normal distribution with mean = mode and stdev
   // = stdev to the mode from the sampled gc content from the data
   double ans = 0.0, theoretical_sum = 0.0, z;
-  array <double, 101> theoretical;
+  theoretical.fill(0);
   for (size_t i = 0; i < 101; ++i) {
     z = i - mode;
     theoretical[i] = exp(- (z*z)/ (2 * stdev *stdev));
@@ -183,9 +184,9 @@ sum_deviation_from_normal (const array <size_t, 101> &gc_content) {
   }
 
   // Normalize theoretical so it sums to the total of reads 
-  for (size_t i = 0; i < 101; ++i)
+  for (size_t i = 0; i < 101; ++i) {
     theoretical[i] = theoretical[i] * num_reads / theoretical_sum;
-
+  }
   for (size_t i = 0; i < 101; ++i)
     ans += fabs(gc_content[i] - theoretical[i]);
   
@@ -464,7 +465,7 @@ Config::get_matching_contaminant (string seq) const {
 
 struct FastqStats {
   // number of bases for static allocation. 
-  static const size_t kNumBases = 60;
+  static const size_t kNumBases = 1000;
 
   // Value to subtract quality characters to get the actual quality value
   static const size_t kBaseQuality = 33;  // The ascii for the lowest quality
@@ -496,6 +497,7 @@ struct FastqStats {
   size_t total_bases;  // sum of all bases in all reads
   size_t avg_read_length;  // average of all read lengths
   size_t num_reads;  // total number of lines read
+  size_t min_read_length; // minimum read length seen
   size_t max_read_length;  // total number of lines read
   size_t num_poor;  // reads whose average quality was <= poor
   size_t num_extra_bases;  // number of bases outside of buffer
@@ -533,6 +535,7 @@ struct FastqStats {
   /*********** PER GC VALUE METRICS ****************/
   // histogram of GC fraction in each read from 0 to 100%
   array<size_t, 101> gc_count;
+  array<double, 101> theoretical_gc_count;
 
     /*********** PER READ METRICS ***************/
   // Distribution of read lengths
@@ -639,6 +642,7 @@ FastqStats::FastqStats(const Config &config) {
   avg_read_length = 0;
   avg_gc = 0;
   num_reads = 0;
+  min_read_length = 0;
   max_read_length = 0;
   num_poor = 0;
 
@@ -738,8 +742,13 @@ FastqStats::summarize(Config &config) {
   // Cumulative read length frequency
   size_t cumulative_sum = 0;
   for (size_t i = 0; i < max_read_length; ++i) {
-    if (i < kNumBases)
+    if (i < kNumBases) {
       cumulative_sum += read_length_freq[i];
+      if (read_length_freq[i] > 0)
+        if (min_read_length == 0)
+          min_read_length = i;
+        
+    }
     else
       cumulative_sum += long_read_length_freq[i - kNumBases];
   }
@@ -932,7 +941,8 @@ FastqStats::summarize(Config &config) {
       gc_count[i] = (gc_count[i+1] + gc_count[i-1])/2;
 
   // Calculate pass warn fail statistics
-  double gc_deviation = sum_deviation_from_normal(gc_count);
+  double gc_deviation = sum_deviation_from_normal(gc_count, 
+                                                  theoretical_gc_count);
   if (gc_deviation >= config.limits["gc_sequence"]["error"])
     pass_per_sequence_gc_content = "fail";
   else if (gc_deviation >= config.limits["gc_sequence"]["warn"])
@@ -1224,7 +1234,7 @@ FastqStats::write(ostream &os, const Config &config) {
   os << "Sequence Length Distribution\t" <<
         pass_sequence_length_distribution << "\n";
 
- os << "Length\tCount\n";
+  os << "Length\tCount\n";
   for (size_t i = 0; i < max_read_length; ++i) {
     if(i < kNumBases) {
       if (read_length_freq[i] > 0)
@@ -1289,7 +1299,7 @@ FastqStats::write(ostream &os, const Config &config) {
     divide_by += (i - kmer_size + 1) * read_length_freq[i];
 
   vector <double> kmer_by_base(config.adapters.size(), 0.0);
-  for (size_t i = 0; i < kNumBases; ++i) {
+  for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
     if (cumulative_read_length_freq[i] > 0) {
       os << i + 1 << "\t";
       jj = 0;
@@ -1871,7 +1881,21 @@ struct HTMLFactory {
   public:
     string sourcecode;
     explicit HTMLFactory (string filepath);
-    void make_position_quality_data(const FastqStats &stats);
+    void replace_placeholder_with_data (const string &placeholder, 
+                                        const string &data);
+    // Function to replace template placeholders with data
+    void make_basic_statistics(const FastqStats &stats,
+                               const Config &config);
+    void make_position_quality_data(const FastqStats &stats,
+                                    const Config &config);
+    void make_sequence_quality_data(const FastqStats &stats,
+                                    const Config &config);
+    void make_base_sequence_content_data(const FastqStats &stats,
+                                         const Config &config);
+    void make_sequence_gc_content_data(const FastqStats &stats,
+                                       const Config &config);
+
+
 };
 
 HTMLFactory::HTMLFactory (string filepath) {
@@ -1886,41 +1910,216 @@ HTMLFactory::HTMLFactory (string filepath) {
     sourcecode += line + "\n";
 }
 
-void 
-HTMLFactory::make_position_quality_data (const FastqStats &stats) {
-  ostringstream data;
-  const string placeholder = "{{\"SEQBASEQUALITYDATA\"}}";
-  size_t max_bases_to_report = 100;
-  size_t limit = min(stats.max_read_length, max_bases_to_report);
-  for (size_t i = 0; i < limit; ++i) {
-    // TODO (gui): see how fastqc handles large datasets
-    if (i < 100) {
-      data << "{y : [" 
-           << stats.ldecile[i] << ", "
-           << stats.lquartile[i] << ", "
-           << stats.median[i] << ", "
-           << stats.uquartile[i] << ", "
-           << stats.udecile[i] << "], ";
-      data << "type : 'box', marker : {color : '";
-      if(stats.median[i] > 30)
-        data << "green";
-      else if (stats.median[i] > 20)
-        data << "yellow";
-      else
-        data << "red";
-      data << "'}}";
-
-      if (i < limit - 1)
-        data << ", ";
-    }
-  }
-
+void
+HTMLFactory::replace_placeholder_with_data (const string &placeholder, 
+                                            const string &data) {
   auto pos = sourcecode.find(placeholder);
   if (pos == string::npos)
-    throw runtime_error ("placeholder for quality base data not found");
+    throw runtime_error ("placeholder not found: " + placeholder);
 
-  sourcecode.replace(pos, placeholder.size(), data.str());
+  sourcecode.replace(pos, placeholder.size(), data);
 }
+
+void 
+HTMLFactory::make_basic_statistics(const FastqStats &stats,
+                                   const Config &config) {
+  string placeholder = "{{BASICSTATSDATA}}";
+  ostringstream data;
+  data << "<table><thead><tr><th>Measure</th><th>Value</th></tr></thead><tbody>";
+  data << "<tr><td>Filename</td><td>" << strip_path(config.filename)
+       << "</td></tr>";
+  data << "<tr><td>Filetype</td><td>" << "Conventional base calls" 
+       << "</td></tr>";
+  data << "<tr><td>Encoding</td><td>" << "Sanger / Illumina 1.9" << "</td></tr>";
+  data << "<tr><td>Total Sequences</td><td>" << stats.num_reads << "</td></tr>";
+  data << "<tr><td>Sequences Flagged As Poor Quality</td><td>" 
+       << stats.num_poor << "</td></tr>";
+  data << "<tr><td>Sequence length</td><td>" ;
+  if(stats.min_read_length != stats.max_read_length)
+    data << stats.min_read_length << " - " << stats.max_read_length;
+  else
+    data << stats.max_read_length;
+  data << "</td></tr>";
+  data << "<tr><td>%GC:</td><td>" << stats.avg_gc << "</td></tr>";
+  data << "</tbody></table>";
+
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+void 
+HTMLFactory::make_position_quality_data (const FastqStats &stats,
+                                         const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{SEQBASEQUALITYDATA}}";
+  for (size_t i = 0; i < stats.max_read_length; ++i) {
+    data << "{y : [";
+
+   if (i < stats.kNumBases) {   
+     data << stats.ldecile[i] << ", "
+          << stats.lquartile[i] << ", "
+          << stats.median[i] << ", "
+          << stats.uquartile[i] << ", "
+          << stats.udecile[i] << "], ";
+   } else {
+     data << stats.long_ldecile[i - stats.kNumBases] << ", "
+          << stats.long_lquartile[i - stats.kNumBases] << ", "
+          << stats.long_median[i - stats.kNumBases] << ", "
+          << stats.long_uquartile[i - stats.kNumBases] << ", "
+          << stats.long_udecile[i - stats.kNumBases] << "], ";
+   }
+   data << "type : 'box', name : ' " << i << "', ";
+   data << "marker : {color : '";
+   if(stats.median[i] > 30)
+     data << "green";
+   else if (stats.median[i] > 20)
+     data << "yellow";
+   else
+     data << "red";
+   data << "'}}";
+   if (i < stats.max_read_length - 1)
+     data << ", ";
+
+  }
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+void 
+HTMLFactory::make_sequence_quality_data (const FastqStats &stats,
+                                         const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{SEQQUALITYDATA}}";
+
+  // X values : avg quality phred scores
+  data << "{x : [";
+  for (size_t i = 0; i < 41; ++i) {
+    data << i + stats.kBaseQuality;
+   if (i < 40)
+     data << ", ";
+  }
+
+  // Y values: frequency with which they were seen
+  data << "], y : [";
+  for (size_t i = 0; i < 41; ++i) {
+    data << stats.quality_count[i];
+   if (i < 40)
+     data << ", ";
+  }
+  data << "], type: 'scatter'}";
+
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+
+void 
+HTMLFactory::make_base_sequence_content_data (const FastqStats &stats,
+                                              const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{BASESEQCONTENTDATA}}";
+
+  // ATGC
+  for (size_t base = 0; base < stats.kNumNucleotides; ++base){
+    // start line
+    data << "{";
+
+    // X values : base position
+    data << "x : [";
+    for (size_t i = 0; i < stats.max_read_length; ++i) {
+      data << i+1;
+      if (i < stats.max_read_length - 1)
+        data << ", ";
+    }
+
+    // Y values: frequency with which they were seen
+    data << "], y : [";
+    for (size_t i = 0; i < stats.max_read_length; ++i) {
+      if (base == 0)
+        if (i < stats.kNumBases) data << stats.a_pct[i];
+        else data << stats.long_a_pct[i - stats.kNumBases];
+
+      if (base == 1)
+        if (i < stats.kNumBases) data << stats.c_pct[i];
+        else data << stats.long_c_pct[i - stats.kNumBases];
+
+      if (base == 2)
+        if (i < stats.kNumBases) data << stats.t_pct[i];
+        else data << stats.long_t_pct[i - stats.kNumBases];
+
+      if (base == 3)
+        if (i < stats.kNumBases) data << stats.g_pct[i];
+        else data << stats.long_g_pct[i - stats.kNumBases];
+
+      if (i < stats.max_read_length - 1)
+        data << ", ";
+    }
+
+    data << "], mode : 'lines', ";
+
+    // color
+    data << "line :{ color : '";
+    if(base == 0) 
+      data << "green";
+    else if (base == 1)
+      data << "blue";
+    else if (base == 2)
+      data << "red";
+    else 
+      data << "black";
+    data << "'}";
+    // end color
+    
+    // end line
+    data << "}";
+    if (base < stats.kNumNucleotides - 1)
+      data << ", ";
+  }
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+void 
+HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats,
+                                            const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{SEQGCCONTENTDATA}}";
+
+  // Actual count
+  data << "{x : [";
+  for (size_t i = 0; i < 101; ++i) {
+    data << i + 1;
+    if (i < 101)
+      data << ", ";
+  }
+
+  // Y values: frequency with which they were seen
+  data << "], y : [";
+  for (size_t i = 0; i < 101; ++i) {
+    data << stats.gc_count[i];
+   if (i < 101)
+     data << ", ";
+  }
+  data << "], type: 'line', line : {color : 'red'}}";
+
+  // Theoretical count
+  data << ", {x : [";
+  for (size_t i = 0; i < 101; ++i) {
+    data << i + 1;
+    if (i < 101)
+      data << ", ";
+  }
+
+  // Y values: frequency with which they were seen
+  data << "], y : [";
+  for (size_t i = 0; i < 101; ++i) {
+    data << stats.theoretical_gc_count[i];
+   if (i < 101)
+     data << ", ";
+  }
+  data << "], type: 'line', line : {color : 'blue'}}";
+
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+
+
 /******************************************************
  ********************* MAIN ***************************
  ******************************************************/
@@ -2090,8 +2289,14 @@ int main(int argc, const char **argv) {
   stats.write(os, config);
 
   /************************ WRITE TO HTML *****************************/
+  if (!config.quiet)
+    cerr << "Making html.\n";
   HTMLFactory factory ("html/template.html");
-  factory.make_position_quality_data (stats);
+  factory.make_basic_statistics (stats, config);
+  factory.make_position_quality_data (stats, config);
+  factory.make_sequence_quality_data (stats, config);
+  factory.make_base_sequence_content_data (stats, config);
+  factory.make_sequence_gc_content_data (stats, config);
   ofstream html (config.outfile + ".html");
   html << factory.sourcecode;
   html.close();
