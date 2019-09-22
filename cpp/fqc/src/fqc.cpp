@@ -1878,24 +1878,32 @@ FastqReader::operator >> (FastqStats &stats) {
 /*************** HTML FACTORY***** *********************/
 /*******************************************************/
 struct HTMLFactory {
-  public:
-    string sourcecode;
-    explicit HTMLFactory (string filepath);
-    void replace_placeholder_with_data (const string &placeholder, 
-                                        const string &data);
-    // Function to replace template placeholders with data
-    void make_basic_statistics(const FastqStats &stats,
-                               const Config &config);
-    void make_position_quality_data(const FastqStats &stats,
-                                    const Config &config);
-    void make_sequence_quality_data(const FastqStats &stats,
-                                    const Config &config);
-    void make_base_sequence_content_data(const FastqStats &stats,
-                                         const Config &config);
-    void make_sequence_gc_content_data(const FastqStats &stats,
+ public:
+  string sourcecode;
+  explicit HTMLFactory (string filepath);
+  void replace_placeholder_with_data (const string &placeholder, 
+                                      const string &data);
+  // Function to replace template placeholders with data
+  void make_basic_statistics(const FastqStats &stats,
+                             const Config &config);
+
+  void make_position_quality_data(const FastqStats &stats,
+                                  const Config &config);
+
+  void make_sequence_quality_data(const FastqStats &stats,
+                                  const Config &config);
+
+  void make_base_sequence_content_data(const FastqStats &stats,
                                        const Config &config);
 
+  void make_sequence_gc_content_data(const FastqStats &stats,
+                                     const Config &config);
+  void make_base_n_content_data(const FastqStats &stats,
+                                const Config &config);
 
+  void make_sequence_duplication_data(const FastqStats &stats,
+                                      const Config &config);
+    
 };
 
 HTMLFactory::HTMLFactory (string filepath) {
@@ -2004,7 +2012,7 @@ HTMLFactory::make_sequence_quality_data (const FastqStats &stats,
    if (i < 40)
      data << ", ";
   }
-  data << "], type: 'scatter'}";
+  data << "], type: 'line', line : {color : 'red'}}";
 
   replace_placeholder_with_data (placeholder, data.str());
 }
@@ -2117,6 +2125,80 @@ HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats,
 
   replace_placeholder_with_data (placeholder, data.str());
 }
+
+void 
+HTMLFactory::make_base_n_content_data (const FastqStats &stats,
+                                            const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{BASENCONTENTDATA}}";
+
+  // base position
+  data << "{x : [";
+  for (size_t i = 0; i < stats.max_read_length; ++i) {
+    data << i + 1;
+    if (i < stats.max_read_length - 1)
+      data << ", ";
+  }
+
+  // Y values: frequency with which they were seen
+  data << "], y : [";
+  for (size_t i = 0; i < stats.max_read_length; ++i) {
+    if (i < stats.kNumBases)
+      data << stats.n_pct[i];
+    else
+      data << stats.long_n_pct[i - stats.kNumBases];
+
+    if (i < stats.max_read_length - 1)
+      data << ", ";
+  }
+  data << "], type: 'line', line : {color : 'red'}}";
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+void 
+HTMLFactory::make_sequence_duplication_data (const FastqStats &stats,
+                                             const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{SEQDUPDATA}}";
+
+  // non-deduplicated
+  data << "{x : [";
+  for (size_t i = 0; i < 16; ++i) {
+    data << i + 1;
+    if (i < 15)
+      data << ", ";
+  }
+
+  // total percentage in each bin
+  data << "], y : [";
+  for (size_t i = 0; i < 16; ++i) {
+    data << stats.percentage_total[i];
+
+    if (i < 15)
+      data << ", ";
+  }
+  data << "], type: 'line', line : {color : 'blue'}}";
+
+  // deduplicated
+  data << ", {x : [";
+  for (size_t i = 0; i < 16; ++i) {
+    data << i + 1;
+    if (i < 15)
+      data << ", ";
+  }
+
+  // total percentage in deduplicated
+  data << "], y : [";
+  for (size_t i = 0; i < 16; ++i) {
+    data << stats.percentage_deduplicated[i];
+
+    if (i < 15)
+      data << ", ";
+  }
+  data << "], type: 'line', line : {color : 'red'}}";
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
 
 
 
@@ -2297,6 +2379,8 @@ int main(int argc, const char **argv) {
   factory.make_sequence_quality_data (stats, config);
   factory.make_base_sequence_content_data (stats, config);
   factory.make_sequence_gc_content_data (stats, config);
+  factory.make_base_n_content_data (stats, config);
+  factory.make_sequence_duplication_data (stats, config);
   ofstream html (config.outfile + ".html");
   html << factory.sourcecode;
   html.close();
