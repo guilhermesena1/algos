@@ -106,6 +106,13 @@ log2exact(size_t powerOfTwo) {
   return ans - 1;
 }
 
+// Check if a string ends with another, to be use to figure out the file format
+inline bool 
+endswith(std::string const & value, std::string const & ending) {
+      if (ending.size() > value.size()) return false;
+          return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
+}
+
 /******************* IMPLEMENTATION OF FASTQC FUNCTIONS **********************/
 // FastQC extrapolation of counts to the full file size
 double get_corrected_count (size_t count_at_limit,
@@ -207,20 +214,6 @@ struct Config {
   // threshold for a sequence to be considered  poor quality
   size_t kPoorQualityThreshold;
 
-  /************* DUPLICATION ESTIMATES *************/
-  // Number of unique sequences to see before stopping counting sequences
-  size_t kDupUniqueCutoff;
-
-  // Maximum read length to store the entire read in memory
-  size_t kDupReadMaxSize;
-
-  // Prefix size to cut if read length exceeds the value above
-  size_t kDupReadTruncateSize;
-
-  /************ KMER **********/
-  // fastqc' max number of bases in which kmer counts are distributed
-  size_t kKmerMaxBases;
- 
   /************ OVERREPRESENTATION ESTIMTES **********/
   // fraction of the number of slow reads a sequence needs to be seen to be
   // considered a candiate for overrepresentation
@@ -291,13 +284,10 @@ const vector<string> Config::values_to_check ({
     "sequence_length",
     "adapter"
   });
+
 // Sets magic numbers
 Config::Config (){
    kPoorQualityThreshold = 20;
-   kDupUniqueCutoff = 1e5;
-   kDupReadMaxSize = 75;
-   kDupReadTruncateSize = 50;
-   kKmerMaxBases = 500;
    kOverrepMinFrac = 0.001;
 
    casava = false;
@@ -481,7 +471,19 @@ struct FastqStats {
   // maximum tile value
   static const size_t kNumMaxTiles = 65536;
 
+  // Maximum number of bases for which to do kmer statistics
+  static const size_t kKmerMaxBases = 500;
 
+  /************* DUPLICATION ESTIMATES *************/
+  // Number of unique sequences to see before stopping counting sequences
+  static const size_t kDupUniqueCutoff = 1e5;
+
+  // Maximum read length to store the entire read in memory
+  static const size_t kDupReadMaxSize = 75;
+
+  // Prefix size to cut if read length exceeds the value above
+  static const size_t kDupReadTruncateSize = 50;
+ 
  public:
   /*********** SINGLE NUMBERS FROM THE ENTIRE FASTQ ****************/
   size_t kBitShiftNucleotide;  // log 2 of value above
@@ -671,7 +673,7 @@ FastqStats::FastqStats(const Config &config) {
   // Defines k-mer mask, length and allocates vector
   kmer_size = config.kmer_size;
   kmer_mask = (1ll << (2*kmer_size)) - 1;
-  kmer_count = vector<size_t>(min(kNumBases, config.kKmerMaxBases) 
+  kmer_count = vector<size_t>(min(kNumBases, kKmerMaxBases) 
                                   * (kmer_mask + 1), 0);
   kBitShiftKmer = 2*kmer_size;
 }
@@ -1065,7 +1067,7 @@ FastqStats::summarize(Config &config) {
 
   // Cumulative count of kmers by position
   size_t jj;
-  for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
+  for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
     if (cumulative_read_length_freq[i] > 0) {
 
       // Makes the count of kmers by position cumulative by copying
@@ -1086,7 +1088,7 @@ FastqStats::summarize(Config &config) {
     }
   }
 
-  for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
+  for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
     if (cumulative_read_length_freq[i] > 0) {
       jj = 0;
       for (auto v : config.adapters) {
@@ -1335,7 +1337,7 @@ FastqStats::write(ostream &os, const Config &config) {
 
   // Number of kmers counted
   size_t jj;
-  for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
+  for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
     if (cumulative_read_length_freq[i] > 0) {
       os << i + 1 << "\t";
       jj = 0;
@@ -1353,21 +1355,34 @@ FastqStats::write(ostream &os, const Config &config) {
 }
 
 /*************************************************************
- ******************** FASTQ READER ***************************
+ ******************** STREAM READER **************************
  *************************************************************/
 
-struct FastqReader{
+// Generic class that does as much as possible without assuming file format
+class StreamReader{
  public:
+  // This will tell me which character to look for to go to the next field
+  const char separator;
+
   // Memory map variables
   char *curr;  // current position in file
   char *last;  // last position in file
   struct stat st;
 
   // config on how to handle reads
-  Config config;
+  bool do_duplication,
+       do_kmer,
+       do_n_content,
+       do_overrepresented,
+       do_quality_base,
+       do_sequence,
+       do_gc_sequence,
+       do_quality_sequence,
+       do_tile,
+       do_sequence_length;
 
   // buffer size to store line 2 of each read
-  size_t buffer_size;
+  const size_t buffer_size;
 
   // Number of bases that have overflown the buffer
   size_t leftover_ind;
@@ -1427,24 +1442,28 @@ struct FastqReader{
 
   /************ FUNCTIONS TO READ LINES IN DIFFERENT WAYS ***********/
   inline void read_fast_forward_line();  // run this to ignore a line
+  inline void skip_separator();  // keep going forward while = separator
   inline void read_tile_line(FastqStats &stats);  // get tile from read name
   inline void read_sequence_line(FastqStats &stats);  // parse sequence
   inline void read_quality_line(FastqStats &stats);  // parse quality
 
-  explicit FastqReader(const Config _config,
-                       const size_t buffer_size);
+  StreamReader (Config config,
+                const size_t buffer_size,
+                const char _separator);
 
   void memorymap(const string &filename,
                  const bool quiet);
   void memoryunmap();
-  inline bool operator >> (FastqStats &stats);
+
+  /************ FUNCTIONS TO IMPLEMENT BASED ON FILES  ***********/
+  virtual inline bool operator >> (FastqStats &stats) = 0;
 };
 
-FastqReader::FastqReader(const Config _config,
-                         const size_t _buffer_size) {
-
-  config = _config;
-  buffer_size = _buffer_size;
+StreamReader::StreamReader(Config config,
+                           const size_t _buffer_size,
+                           const char _separator) : 
+  separator (_separator),
+  buffer_size (_buffer_size) {
 
   // Allocates buffer to temporarily store reads
   buffer.resize(buffer_size + 1);
@@ -1454,11 +1473,23 @@ FastqReader::FastqReader(const Config _config,
   tile_ignore= false;
   tile_cur= 0;
   tile_split_point = 0;
+
+  // Get useful data from config that allows us to possibly skip some analyses
+  do_duplication = (config.limits["duplication"]["ignore"] == 0.0);
+  do_kmer = (config.limits["kmer"]["ignore"] == 0.0);
+  do_n_content = (config.limits["n_content"]["ignore"] == 0.0);
+  do_overrepresented = (config.limits["overrepresented"]["ignore"] == 0.0);
+  do_quality_base = (config.limits["quality_base"]["ignore"] == 0.0);
+  do_sequence = (config.limits["sequence"]["ignore"] == 0.0);
+  do_gc_sequence = (config.limits["gc_sequence"]["ignore"] == 0.0);
+  do_quality_sequence= (config.limits["quality_sequence"]["ignore"] == 0.0);
+  do_tile = (config.limits["tile"]["ignore"] == 0.0);
+  do_sequence_length = (config.limits["sequence_length"]["ignore"] == 0.0);
 }
 
 // Open file
 void
-FastqReader::memorymap(const string &filename,
+StreamReader::memorymap(const string &filename,
                        const bool quiet) {
   int fd = open(filename.c_str(), O_RDONLY, 0);
   if (fd == -1)
@@ -1494,7 +1525,7 @@ FastqReader::memorymap(const string &filename,
 }
 
 void
-FastqReader::memoryunmap() {
+StreamReader::memoryunmap() {
   munmap(mmap_data, st.st_size);
   buffer.clear();
   leftover_buffer.clear();
@@ -1502,7 +1533,7 @@ FastqReader::memoryunmap() {
 
 // Fastqc only counts kmers once every 50 reads. We will do it once every 32
 inline bool
-FastqReader::is_kmer_line(const FastqStats &stats) {
+StreamReader::is_kmer_line(const FastqStats &stats) {
   return (!(stats.num_reads & 31));
 }
 
@@ -1511,7 +1542,7 @@ FastqReader::is_kmer_line(const FastqStats &stats) {
 /*******************************************************/
 // puts base either on buffer or leftover
 inline void
-FastqReader::put_base() {
+StreamReader::put_base() {
   base_from_buffer = *curr;
   if (write_to_buffer) {
     buffer[read_pos] = base_from_buffer;
@@ -1525,7 +1556,7 @@ FastqReader::put_base() {
 
 // Gets base from either buffer or leftover
 inline void
-FastqReader::get_base() {
+StreamReader::get_base() {
   if (read_from_buffer) {
     base_from_buffer = buffer[read_pos];
   } else {
@@ -1534,23 +1565,38 @@ FastqReader::get_base() {
 }
 
 /*******************************************************/
-/*************** TILE PROCESSING ***********************/
+/*************** FAST FOWARD ***************************/
 /*******************************************************/
 
+// Keeps going forward while the current character is a separator
+inline void
+StreamReader::skip_separator() {
+  for(; *curr == separator; ++curr);
+}
+
+// Skips lines that are not relevant
+inline void
+StreamReader::read_fast_forward_line(){
+  for (; *curr != separator; ++curr) {}
+}
+
+/*******************************************************/
+/*************** TILE PROCESSING ***********************/
+/*******************************************************/
 // Fastqc does tile statistics once every 10 lines, 
 // we will do once every 8 so we can use bits instead of module arithmetic
 inline bool
-FastqReader::is_tile_line(const FastqStats &stats) {
+StreamReader::is_tile_line(const FastqStats &stats) {
   return (!(stats.num_reads & 7));
 }
 
 // Parse the comment 
 inline void 
-FastqReader::get_tile_split_position(){
+StreamReader::get_tile_split_position(){
   size_t num_colon = 0;
 
   // Count colons to know the formatting pattern
-  for (; *curr != '\n'; ++curr) {
+  for (; *curr != separator; ++curr) {
     if (*curr == ':')
       ++num_colon;
   }
@@ -1568,10 +1614,10 @@ FastqReader::get_tile_split_position(){
 }
 
 inline void
-FastqReader::get_tile_value() {
+StreamReader::get_tile_value() {
   tile_cur = 0;
   size_t num_colon = 0;
-  for(; *curr != '\n'; ++curr) {
+  for(; *curr != separator; ++curr) {
     if (*curr == ':')
       ++num_colon;
 
@@ -1579,7 +1625,7 @@ FastqReader::get_tile_value() {
       ++curr;  // pass the colon
 
       // parse till next colon or \n
-      for(; (*curr != ':') && (*curr != '\n'); ++curr)
+      for(; (*curr != ':') && (*curr != separator); ++curr)
         tile_cur = tile_cur*10 + (*curr - '0');
 
       ++num_colon;
@@ -1589,7 +1635,7 @@ FastqReader::get_tile_value() {
 
 // Gets the tile from the sequence name (if applicable)
 inline void
-FastqReader::read_tile_line(FastqStats &stats){
+StreamReader::read_tile_line(FastqStats &stats){
   // if there is no tile information in the fastq header, fast
   // forward this line
   if (tile_ignore) {
@@ -1604,20 +1650,14 @@ FastqReader::read_tile_line(FastqStats &stats){
   }
 
   // We haven't parsed the first line to know the split point
-  if (tile_split_point == 0) 
+  if (tile_split_point == 0)  {
     get_tile_split_position();
-  else
+  }
+  else {
     get_tile_value();
-
-  ++curr;  // skip newline
+  }
 }
 
-// Skips lines that are not relevant
-inline void
-FastqReader::read_fast_forward_line(){
-  for (; *curr != '\n'; ++curr) {}
-  ++curr;  // skips \n from line 1
-}
 
 /*******************************************************/
 /*************** SEQUENCE PROCESSING *******************/
@@ -1626,7 +1666,7 @@ FastqReader::read_fast_forward_line(){
 // This is probably the most important function for speed, so it must be really
 // optimized at all times
 inline void
-FastqReader::process_sequence_base_from_buffer(FastqStats &stats) {
+StreamReader::process_sequence_base_from_buffer(FastqStats &stats) {
   if(base_from_buffer == 'N') {
     stats.n_base_count[read_pos]++;
     num_bases_after_n = 1;  // start over the current kmer
@@ -1642,7 +1682,7 @@ FastqReader::process_sequence_base_from_buffer(FastqStats &stats) {
     stats.base_count[(read_pos << stats.kBitShiftNucleotide) | base_ind]++;
 
     if (is_kmer_line(stats)) {
-      if (read_pos < config.kKmerMaxBases) {
+      if (read_pos < stats.kKmerMaxBases) {
         cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
 
         // registers k-mer if we've seen at least k nucleotides since the last n
@@ -1661,7 +1701,7 @@ FastqReader::process_sequence_base_from_buffer(FastqStats &stats) {
 // slower version of process_sequence_base_from_buffer that dynamically
 // allocates
 inline void
-FastqReader::process_sequence_base_from_leftover(FastqStats &stats) {
+StreamReader::process_sequence_base_from_leftover(FastqStats &stats) {
   if(base_from_buffer == 'N') {
 
     stats.long_n_base_count[leftover_ind]++;
@@ -1685,7 +1725,7 @@ FastqReader::process_sequence_base_from_leftover(FastqStats &stats) {
 
 // Gets statistics after reading the entire sequence line
 inline void
-FastqReader::postprocess_sequence_line(FastqStats &stats) {
+StreamReader::postprocess_sequence_line(FastqStats &stats) {
   // read length frequency histogram
   if((read_pos != 0) && (read_pos <= stats.kNumBases))
     stats.read_length_freq[read_pos - 1]++;
@@ -1703,7 +1743,7 @@ FastqReader::postprocess_sequence_line(FastqStats &stats) {
 
 // Reads the line that has the biological sequence
 inline void
-FastqReader::read_sequence_line(FastqStats &stats){
+StreamReader::read_sequence_line(FastqStats &stats){
   // restart line counters
   read_pos = 0;
   cur_gc_count = 0;
@@ -1714,7 +1754,7 @@ FastqReader::read_sequence_line(FastqStats &stats){
   /*********************************************************/
   /********** THIS LOOP MUST BE ALWAYS OPTIMIZED ***********/
   /*********************************************************/
-  for (; *curr != '\n'; ++curr) {
+  for (; *curr != separator; ++curr) {
     // puts base either on buffer or leftover 
     put_base();
     // Make sure we have memory space to process new base
@@ -1746,7 +1786,6 @@ FastqReader::read_sequence_line(FastqStats &stats){
       write_to_buffer = false;
     }
   }
-  ++curr;  // skip \n
 
   // statistics summarized after the read
   postprocess_sequence_line(stats);
@@ -1757,7 +1796,7 @@ FastqReader::read_sequence_line(FastqStats &stats){
 
 // Process quality value the fast way from buffer
 inline void
-FastqReader::process_quality_base_from_buffer(FastqStats &stats) {
+StreamReader::process_quality_base_from_buffer(FastqStats &stats) {
   // N quality stats
   if (base_from_buffer == 'N') {
     stats.n_base_quality[read_pos] += quality_value;
@@ -1784,7 +1823,7 @@ FastqReader::process_quality_base_from_buffer(FastqStats &stats) {
 
 // Slow version of function above
 inline void
-FastqReader::process_quality_base_from_leftover(FastqStats &stats) {
+StreamReader::process_quality_base_from_leftover(FastqStats &stats) {
 
   // N quality stats
   if (base_from_buffer == 'N') {
@@ -1814,7 +1853,7 @@ FastqReader::process_quality_base_from_leftover(FastqStats &stats) {
 
 // Reads the quality line of each base.
 inline void
-FastqReader::read_quality_line(FastqStats &stats){
+StreamReader::read_quality_line(FastqStats &stats){
   // reset quality counts
   read_pos = 0;
   cur_quality = 0;
@@ -1847,7 +1886,6 @@ FastqReader::read_quality_line(FastqStats &stats){
       read_from_buffer = false;
     }
   }
-  ++curr;  // skip \n
 
   // Average quality approximated to the nearest integer. Used to make a
   // histogram in the end of the summary.
@@ -1860,24 +1898,24 @@ FastqReader::read_quality_line(FastqStats &stats){
 
 /*************** THIS IS VERY SLOW ********************/
 inline void
-FastqReader::postprocess_fastq_record(FastqStats &stats) {
+StreamReader::postprocess_fastq_record(FastqStats &stats) {
 
   // if reads are >75pb, truncate to 50
-  if(read_pos <= config.kDupReadMaxSize)
+  if(read_pos <= stats.kDupReadMaxSize)
     sequence_to_hash = buffer.substr(0, read_pos);
   else
-    sequence_to_hash = buffer.substr(0, config.kDupReadTruncateSize);
+    sequence_to_hash = buffer.substr(0, stats.kDupReadTruncateSize);
 
   // New sequence found 
   if(stats.sequence_count.count(sequence_to_hash) == 0) {
-    if (stats.num_unique_seen != config.kDupUniqueCutoff) {
+    if (stats.num_unique_seen != stats.kDupUniqueCutoff) {
       stats.sequence_count.insert({{sequence_to_hash, 1}});
       stats.count_at_limit = stats.num_reads;
       ++stats.num_unique_seen;
     }
   } else {
     stats.sequence_count[sequence_to_hash]++;
-    if (stats.num_unique_seen < config.kDupUniqueCutoff)
+    if (stats.num_unique_seen < stats.kDupUniqueCutoff)
       stats.count_at_limit = stats.num_reads;
   }
 
@@ -1891,13 +1929,31 @@ FastqReader::postprocess_fastq_record(FastqStats &stats) {
 /*******************************************************/
 /*************** READ FASTQ RECORD *********************/
 /*******************************************************/
+class FastqReader : public StreamReader {
+  public:
+    FastqReader(const Config _config,
+                const size_t _buffer_size);
+    inline bool operator >> (FastqStats &stats);
+};
 
+// Set fastq separator as \n
+FastqReader::FastqReader (Config config,
+                          const size_t _buffer_size) : 
+StreamReader(config, _buffer_size, '\n') {
+
+}
+
+// Parses the particular fastq format
 inline bool
 FastqReader::operator >> (FastqStats &stats) {
   read_tile_line(stats);
+  skip_separator();
   read_sequence_line(stats);
+  skip_separator();
   read_fast_forward_line();
+  skip_separator();
   read_quality_line(stats);
+  skip_separator();
   postprocess_fastq_record(stats);
 
   // Successful read, increment number in stats
@@ -1908,6 +1964,42 @@ FastqReader::operator >> (FastqStats &stats) {
 
 }
 
+/*******************************************************/
+/*************** READ SAM RECORD ***********************/
+/*******************************************************/
+class SamReader : public StreamReader {
+  public:
+    SamReader (const Config _config, const size_t _buffer_size);
+    inline bool operator >> (FastqStats &stats);
+};
+
+// set sam separator as space
+SamReader::SamReader (Config config,
+                      const size_t _buffer_size) : 
+StreamReader(config, _buffer_size, '\t') {
+
+}
+
+inline bool
+SamReader::operator >> (FastqStats &stats) {
+  read_tile_line(stats);
+  skip_separator();
+  for (size_t i = 0; i < 8; ++i) {
+    read_fast_forward_line();
+    skip_separator();
+  }
+  read_sequence_line(stats);
+  read_quality_line(stats);
+  postprocess_fastq_record(stats);
+  // skip \n
+  ++curr;
+
+  stats.num_reads++;
+
+  // Returns if file should keep being checked
+  return (curr < last - 1);
+
+}
 /*******************************************************/
 /*************** HTML FACTORY***** *********************/
 /*******************************************************/
@@ -2271,9 +2363,8 @@ HTMLFactory::make_sequence_length_data (const FastqStats &stats,
 
   // X values : avg quality phred scores
   data << "{x : [";
-  bool first_seen = false, seen;
+  bool first_seen = false;
   for (size_t i = 0; i < stats.max_read_length; ++i) {
-    seen  = false;
     if(!first_seen)
       first_seen = true;
     else 
@@ -2392,7 +2483,7 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
   ostringstream data;
 
   // Number of bases to make adapter content
-  size_t num_bases =  min(stats.kNumBases, config.kKmerMaxBases);
+  size_t num_bases =  min(stats.kNumBases, stats.kKmerMaxBases);
   bool seen_first = false;
 
   size_t jj = 0;
@@ -2435,6 +2526,7 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
  ********************* MAIN ***************************
  ******************************************************/
 
+
 int main(int argc, const char **argv) {
   clock_t begin = clock();  // register ellapsed time
   /****************** COMMAND LINE OPTIONS ********************/
@@ -2445,6 +2537,7 @@ int main(int argc, const char **argv) {
   bool help = false;
   bool version = false;
   Config config;
+  cerr << "Parsing options\n";
   OptionParser opt_parse(strip_path(argv[0]),
                          "A high throughput sequence QC analysis tool",
                          "seqfile1 seqfile2 ... seqfileN");
@@ -2541,15 +2634,19 @@ int main(int argc, const char **argv) {
     cerr << opt_parse.help_message() << endl;
     return EXIT_SUCCESS;
   }
-  config.filename = leftover_args.front();
-
-  /****************** END COMMAND LINE OPTIONS *****************/
 
   /****************** BEGIN PROCESSING CONFIG ******************/
+  cerr << "Reading config files\n";
+  config.filename = leftover_args.front();
   config.read_limits();
   config.read_adapters();
   config.read_contaminants();
-
+  if (config.format == "") {
+    if (endswith(config.filename, "sam"))
+      config.format = "sam";
+    else 
+      config.format = "fastq";
+  }
   /****************** END PROCESSING CONFIG *******************/
   if (!config.quiet)
     cerr << "Started reading file " << config.filename << ".\n";
@@ -2558,13 +2655,20 @@ int main(int argc, const char **argv) {
   FastqStats stats(config);
 
   // Initializes a reader given the maximum number of bases to summarie
-  FastqReader in (config, stats.kNumBases);
-  in.memorymap(config.filename, config.quiet);
+  StreamReader *in;
+  if (config.format == "sam")
+    in = new SamReader (config, stats.kNumBases);
+  else
+    in = new FastqReader (config, stats.kNumBases);
+
+  in->memorymap(config.filename, config.quiet);
 
   // Read record by record
   const size_t num_reads_to_log = 1000000;
   size_t next_read = num_reads_to_log;
-  while (in >> stats) {
+  
+  cerr << "started streaiming\n";
+  while ((*in) >> stats) {
     if(!config.quiet)
       // Equality is faster than modular arithmetics
       if (stats.num_reads == next_read) {
@@ -2575,7 +2679,8 @@ int main(int argc, const char **argv) {
   }
 
   // Free memory
-  in.memoryunmap();
+  in->memoryunmap();
+  delete in;
   if (!config.quiet)
     cerr << "Finished reading file.\n";
 
@@ -2603,37 +2708,16 @@ int main(int argc, const char **argv) {
   if (!config.quiet)
     cerr << "Making html.\n";
   HTMLFactory factory ("html/template.html");
-  cerr << "basic\n";
   factory.make_basic_statistics (stats, config);
-
-  cerr << "posquality\n";
   factory.make_position_quality_data (stats, config);
-
-  cerr << "tilequality\n";
   factory.make_tile_quality_data (stats, config);
-
-  cerr << "seqquality\n";
   factory.make_sequence_quality_data (stats, config);
-
-  cerr << "seqcontent\n";
   factory.make_base_sequence_content_data (stats, config);
-
-  cerr << "seqgc\n";
   factory.make_sequence_gc_content_data (stats, config);
-
-  cerr << "basen\n";
   factory.make_base_n_content_data (stats, config);
-
-  cerr << "seqlength\n";
   factory.make_sequence_length_data (stats, config);
-
-  cerr << "seqdup\n";
   factory.make_sequence_duplication_data (stats, config);
-  
-  cerr << "overrep\n";
   factory.make_overrepresented_sequences_data (stats, config);
-
-  cerr << "adapter\n";
   factory.make_adapter_content_data (stats, config);
   ofstream html (config.outfile + ".html");
   html << factory.sourcecode;
