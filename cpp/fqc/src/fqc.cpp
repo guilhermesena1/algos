@@ -1086,7 +1086,6 @@ FastqStats::summarize(Config &config) {
     }
   }
 
-
   for (size_t i = 0; i < min(kNumBases, config.kKmerMaxBases); ++i) {
     if (cumulative_read_length_freq[i] > 0) {
       jj = 0;
@@ -1102,6 +1101,7 @@ FastqStats::summarize(Config &config) {
       }
     }
   }
+
   /************** KMER CONTENT *********************************/
   pass_kmer_content = "pass";
 
@@ -1924,6 +1924,10 @@ struct HTMLFactory {
   void make_position_quality_data(const FastqStats &stats,
                                   const Config &config);
 
+  void make_tile_quality_data(const FastqStats &stats,
+                                  const Config &config);
+
+
   void make_sequence_quality_data(const FastqStats &stats,
                                   const Config &config);
 
@@ -1935,12 +1939,18 @@ struct HTMLFactory {
   void make_base_n_content_data(const FastqStats &stats,
                                 const Config &config);
 
+  void make_sequence_length_data(const FastqStats &stats,
+                                 const Config &config);
+
   void make_sequence_duplication_data(const FastqStats &stats,
                                       const Config &config);
 
   void make_overrepresented_sequences_data(const FastqStats &stats,
                                            const Config &config);
 
+
+  void make_adapter_content_data(FastqStats &stats,
+                                 const Config &config);
 
 };
 
@@ -1997,16 +2007,20 @@ HTMLFactory::make_position_quality_data (const FastqStats &stats,
                                          const Config &config) {
   ostringstream data;
   const string placeholder = "{{SEQBASEQUALITYDATA}}";
+
+  size_t cur_median;
   for (size_t i = 0; i < stats.max_read_length; ++i) {
     data << "{y : [";
 
-   if (i < stats.kNumBases) {   
+   if (i < stats.kNumBases) {
+     cur_median = stats.median[i];
      data << stats.ldecile[i] << ", "
           << stats.lquartile[i] << ", "
           << stats.median[i] << ", "
           << stats.uquartile[i] << ", "
           << stats.udecile[i] << "], ";
    } else {
+     cur_median = stats.long_median[i - stats.kNumBases];
      data << stats.long_ldecile[i - stats.kNumBases] << ", "
           << stats.long_lquartile[i - stats.kNumBases] << ", "
           << stats.long_median[i - stats.kNumBases] << ", "
@@ -2015,9 +2029,9 @@ HTMLFactory::make_position_quality_data (const FastqStats &stats,
    }
    data << "type : 'box', name : ' " << i << "', ";
    data << "marker : {color : '";
-   if(stats.median[i] > 30)
+   if(cur_median > 30)
      data << "green";
-   else if (stats.median[i] > 20)
+   else if (cur_median > 20)
      data << "yellow";
    else
      data << "red";
@@ -2026,6 +2040,62 @@ HTMLFactory::make_position_quality_data (const FastqStats &stats,
      data << ", ";
 
   }
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+void
+HTMLFactory::make_tile_quality_data (const FastqStats &stats,
+                                     const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{TILEQUALITYDATA}}";
+  // X: position
+  data << "{x : [";
+  for (size_t i = 0; i < stats.max_read_length; ++i) {
+    data << i+1;
+    if (i < stats.max_read_length - 1)
+      data << ",";
+  }
+
+  // Y : Tile
+  data << "], y: [";
+  bool first_seen = false;
+  for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
+    if(stats.tile_count[i] > 0) {
+      if(!first_seen)
+        first_seen = true;
+      else 
+        data << ",";
+      data << i;
+    }
+  }
+
+  // Z: quality z score
+  data << "], z: [";
+  first_seen = false;
+  for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
+    if(stats.tile_count[i] > 0) {
+      if(!first_seen)
+        first_seen = true;
+      else 
+        data << ", ";
+
+      // datart new array with all counts
+      data << "[";
+      for (size_t j = 0; j < stats.max_read_length; ++j) {
+        if (j < stats.kNumBases)
+          data << stats.tile_position_quality[(j << stats.kBitShiftTile) | i];
+        else
+          data << stats.long_tile_position_quality[
+            ((j - stats.kNumBases) << stats.kBitShiftTile) | i];
+
+        if (j < stats.max_read_length - 1)
+          data << ",";
+      }
+      data << "]";
+    }
+  }
+  data << "]";
+  data << ", type : 'heatmap' }";
   replace_placeholder_with_data (placeholder, data.str());
 }
 
@@ -2194,6 +2264,54 @@ HTMLFactory::make_base_n_content_data (const FastqStats &stats,
 }
 
 void 
+HTMLFactory::make_sequence_length_data (const FastqStats &stats,
+                                         const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{SEQLENDATA}}";
+
+  // X values : avg quality phred scores
+  data << "{x : [";
+  bool first_seen = false, seen;
+  for (size_t i = 0; i < stats.max_read_length; ++i) {
+    seen  = false;
+    if(!first_seen)
+      first_seen = true;
+    else 
+      data << ",";
+    if (i < stats.kNumBases){
+      if (stats.read_length_freq[i] > 0)
+        data << i + 1;
+    } else {
+      if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
+        data << i + 1;
+    }
+  }
+
+  // Y values: frequency with which they were seen
+  data << "], y : [";
+  first_seen = false;
+  for (size_t i = 0; i < stats.max_read_length; ++i) {
+    if(!first_seen)
+      first_seen = true;
+    else 
+      data << ",";
+
+    if (i < stats.kNumBases) {
+      if (stats.read_length_freq[i] > 0)
+        data << stats.read_length_freq[i];
+    }
+    else {
+      if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
+        data << stats.long_read_length_freq[i - stats.kNumBases];
+    }
+  }
+  data << "], type: 'line', line : {color : 'red'}}";
+
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+
+void 
 HTMLFactory::make_sequence_duplication_data (const FastqStats &stats,
                                              const Config &config) {
   ostringstream data;
@@ -2267,6 +2385,51 @@ HTMLFactory::make_overrepresented_sequences_data(const FastqStats &stats,
   replace_placeholder_with_data (placeholder, data.str());
 }
 
+void
+HTMLFactory::make_adapter_content_data (FastqStats &stats,
+                                        const Config &config) {
+  string placeholder = "{{ADAPTERDATA}}";
+  ostringstream data;
+
+  // Number of bases to make adapter content
+  size_t num_bases =  min(stats.kNumBases, config.kKmerMaxBases);
+  bool seen_first = false;
+
+  size_t jj = 0;
+  for (auto v : config.adapters) {
+    if (!seen_first)
+      seen_first = true;
+    else
+      data << ",";
+    data << "{";
+
+    // X values : read position
+    data << "x : [";
+    for (size_t i = 0; i < num_bases; ++i) {
+      if (stats.cumulative_read_length_freq[i] > 0){
+        data << i+1;
+        if (i < num_bases - 1)
+          data << ",";
+      }
+    }
+    data << "]";
+
+    // Y values : cumulative adapter frequency
+    data << ", y : [";
+    for (size_t i = 0; i < num_bases; ++i) {
+      if (stats.cumulative_read_length_freq[i] > 0){
+        data << stats.kmer_by_base[i][jj];
+        if (i < num_bases - 1)
+          data << ",";
+      }
+    }
+
+    data << "]";
+    data << ", type : 'line'}";
+    ++jj;
+  }
+  replace_placeholder_with_data (placeholder, data.str());
+}
 
 /******************************************************
  ********************* MAIN ***************************
@@ -2440,14 +2603,38 @@ int main(int argc, const char **argv) {
   if (!config.quiet)
     cerr << "Making html.\n";
   HTMLFactory factory ("html/template.html");
+  cerr << "basic\n";
   factory.make_basic_statistics (stats, config);
+
+  cerr << "posquality\n";
   factory.make_position_quality_data (stats, config);
+
+  cerr << "tilequality\n";
+  factory.make_tile_quality_data (stats, config);
+
+  cerr << "seqquality\n";
   factory.make_sequence_quality_data (stats, config);
+
+  cerr << "seqcontent\n";
   factory.make_base_sequence_content_data (stats, config);
+
+  cerr << "seqgc\n";
   factory.make_sequence_gc_content_data (stats, config);
+
+  cerr << "basen\n";
   factory.make_base_n_content_data (stats, config);
+
+  cerr << "seqlength\n";
+  factory.make_sequence_length_data (stats, config);
+
+  cerr << "seqdup\n";
   factory.make_sequence_duplication_data (stats, config);
+  
+  cerr << "overrep\n";
   factory.make_overrepresented_sequences_data (stats, config);
+
+  cerr << "adapter\n";
+  factory.make_adapter_content_data (stats, config);
   ofstream html (config.outfile + ".html");
   html << factory.sourcecode;
   html.close();
