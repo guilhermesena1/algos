@@ -5,7 +5,7 @@ endif
 PROGS = fqc
 
 INCLUDEDIRS = $(SMITHLAB_CPP)
-#LIBS = 
+LIBS =  -lz
 INCLUDEARGS = $(addprefix -I, $(INCLUDEDIRS))
 CXX = g++
 CXXFLAGS = -O3 -Wall -Wextra -std=c++14

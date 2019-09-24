@@ -210,10 +210,47 @@
 <div class="main">
 <div class="module">
 	<h2 id="basicstatistics">Basic Statistics</h2>
+  {{BASICSTATSDATA}}
 </div>
 <div class="module">
-	<h2 id="perbasesequencequality">Per Base Sequence Quality</h2>
- 	<div id="seqqualityplot"></div>
+	<h2 id="perbasesequencequality">Per base sequence quality</h2>
+ 	<div id="seqbasequalityboxplot"></div>
+</div>
+<div class="module">
+	<h2 id="pertilesequencequality">Per tile sequence quality</h2>
+ 	<div id="tilequalityheatmap"></div>
+</div>
+<div class="module">
+	<h2 id="persequencequalityscores">Per sequence quality scores</h2>
+ 	<div id="seqqualitylineplot"></div>
+</div>
+<div class="module">
+	<h2 id="perbasesequencecontent">Per base sequence content</h2>
+ 	<div id="basesequencecontentlineplot"></div>
+</div>
+<div class="module">
+	<h2 id="persequencegccontent">Per sequence gc content</h2>
+ 	<div id="sequencegccontentlineplot"></div>
+</div>
+<div class="module">
+	<h2 id="perbasencontent">Per base N content</h2>
+ 	<div id="basencontentlineplot"></div>
+</div>
+<div class="module">
+	<h2 id="sequencelengthdistribution">Sequence length distribution</h2>
+ 	<div id="sequencelengthdistributionlineplot"></div>
+</div>
+<div class="module">
+	<h2 id="sequenceduplicationlevels">Sequence duplication levels</h2>
+ 	<div id="seqduplevelslineplot"></div>
+</div>
+<div class="module">
+	<h2 id="overrepresentedsequences">Overrepresented Sequences</h2>
+  {{OVERREPSEQDATA}}
+</div>
+<div class="module">
+  <h2 id="adaptercontent">Adapter content</h2>
+ 	<div id="adapterlineplot"></div>
 </div>
 </div>
 <div class="footer">Produced by FastQC (version 0.11.8)
@@ -224,10 +261,53 @@
 <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
 
 <script>
-Plotly.newPlot('seqqualityplot', [
- {{"SEQBASEQUALITYDATA"}}
+Plotly.newPlot('seqbasequalityboxplot', [
+ {{SEQBASEQUALITYDATA}}
 ], {
-margin: { t: 0 } } );
-</script>
+margin: { t: 0 }, showlegend: false } );
 
+Plotly.newPlot('tilequalityheatmap', [
+ {{TILEQUALITYDATA}}
+], {
+margin: { t: 0 }, showlegend: false } );
+
+
+Plotly.newPlot('seqqualitylineplot', [
+ {{SEQQUALITYDATA}}
+], {
+margin: { t: 0 }, showlegend: true} );
+
+Plotly.newPlot('basesequencecontentlineplot', [
+ {{BASESEQCONTENTDATA}}
+], {
+margin: { t: 0 }, showlegend: true} );
+
+Plotly.newPlot('sequencegccontentlineplot', [
+ {{SEQGCCONTENTDATA}}
+], {
+margin: { t: 0 }, showlegend: true} );
+
+Plotly.newPlot('basencontentlineplot', [
+ {{BASENCONTENTDATA}}
+], {
+margin: { t: 0 }, showlegend: true} );
+
+Plotly.newPlot('sequencelengthdistributionlineplot', [
+ {{SEQLENDATA}}
+], {
+margin: { t: 0 }, showlegend: true} );
+
+Plotly.newPlot('seqduplevelslineplot', [
+ {{SEQDUPDATA}}
+], {
+margin: { t: 0 }, showlegend: true} );
+
+Plotly.newPlot('adapterlineplot', [
+ {{ADAPTERDATA}}
+], {
+margin: { t: 0 }, showlegend: true} );
+
+
+
+</script>
 </html>
