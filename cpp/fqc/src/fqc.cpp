@@ -31,10 +31,12 @@
 #include <array>
 #include <ctime>
 #include <string>
+#include <cstring>
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <zlib.h>
 
 #include "smithlab_utils.hpp"
 #include "smithlab_os.hpp"
@@ -227,6 +229,7 @@ struct Config {
   bool nofilter;  // if running with --casava don't remove read flagged by casava
   bool extract;  // if set the zipped file will be uncompressed
   bool nogroup;  // disable grouping of bases for reads >50bp
+  bool compressed;  // whether or not to inflate file
   size_t min_length;  // lower limit in sequence length to be shown in report
   string format;  // force file format
   size_t threads;  // number of threads to read multiple files in parallel
@@ -253,10 +256,12 @@ struct Config {
   string outfile;
   /*********** FUNCTIONS TO READ FILES *************/
   Config();  // set magic defaults
+  void define_file_format();
   void read_limits();  // populate limits hash map
   void read_adapters();
   void read_contaminants();
 
+  void setup();
   string get_matching_contaminant(string seq) const;
 };
 const vector<string> Config::values_to_check ({
@@ -289,7 +294,6 @@ const vector<string> Config::values_to_check ({
 Config::Config (){
    kPoorQualityThreshold = 20;
    kOverrepMinFrac = 0.001;
-
    casava = false;
    nanopore = false;
    nofilter = false;
@@ -304,6 +308,39 @@ Config::Config (){
    kmer_size = 7;
    quiet = false;
    tmpdir = ".";
+}
+
+void
+Config::setup() {
+  define_file_format();
+  read_limits();
+  if (limits["adapter"]["ignore"] != 0.0)
+    read_adapters();
+  if (limits["adapter"]["ignore"] != 0.0)
+    read_contaminants();
+
+
+}
+
+void
+Config::define_file_format() {
+  if (format == "") {
+    if (endswith(filename, "sam")) {
+      format = "sam";
+      compressed = false;
+    } 
+    else if (endswith(filename, "bam")) {
+      format = "sam";
+      compressed = true;
+    }
+    else {
+      format = "fastq";
+      if (endswith(filename, "gz"))
+        compressed = true;
+      else
+        compressed = false;
+    }
+  }
 }
 
 void
@@ -1361,14 +1398,6 @@ FastqStats::write(ostream &os, const Config &config) {
 // Generic class that does as much as possible without assuming file format
 class StreamReader{
  public:
-  // This will tell me which character to look for to go to the next field
-  const char separator;
-
-  // Memory map variables
-  char *curr;  // current position in file
-  char *last;  // last position in file
-  struct stat st;
-
   // config on how to handle reads
   bool do_duplication,
        do_kmer,
@@ -1381,23 +1410,31 @@ class StreamReader{
        do_tile,
        do_sequence_length;
 
-  // buffer size to store line 2 of each read
-  const size_t buffer_size;
-
-  // Number of bases that have overflown the buffer
-  size_t leftover_ind;
-
   // Whether or not to get bases from buffer when reading quality line
   bool read_from_buffer;
 
   // Whether or not to write bases to buffer when reading sequence
   bool write_to_buffer;
 
+  bool tile_ignore;  // Whether to just ignore per tile sequence quality
+
   // Get a base from the sequence line
   char base_from_buffer;
 
+  // This will tell me which character to look for to go to the next field
+  const char separator;
+
+  // Memory map variables
+  char *curr;  // current position in file
+  char *last;  // last position in file
+  char *buffer;
+
+  // buffer size to store line 2 of each read
+  const size_t buffer_size;
+
+  // Number of bases that have overflown the buffer
+  size_t leftover_ind;
   /********* TILE PARSING ********/
-  bool tile_ignore;  // Whether to just ignore per tile sequence quality
   size_t tile_cur;  // tile value parsed from line 1 of each record
   size_t tile_split_point;
 
@@ -1408,15 +1445,14 @@ class StreamReader{
   size_t cur_gc_count;  // Number of gc bases in read
   size_t cur_quality;  // Sum of quality values in read
   size_t num_bases_after_n;  // count of k-mers that reset at every N
-  void *mmap_data;
+  size_t cur_kmer;  // 32-mer hash as you pass through the sequence line
 
   // Temporarily store line 2 out of 4 to know the base to which
   // quality characters are associated
-  string buffer;
   string leftover_buffer;
   string sequence_to_hash;  // the sequence that will be marked for duplication
+  string filename;
 
-  size_t cur_kmer;  // 32-mer hash as you pass through the sequence line
 
   /************ FUNCTIONS TO PROCESS READS AND BASES ***********/
   inline void put_base();  // puts base in buffer or leftover
@@ -1447,26 +1483,24 @@ class StreamReader{
   inline void read_sequence_line(FastqStats &stats);  // parse sequence
   inline void read_quality_line(FastqStats &stats);  // parse quality
 
-  StreamReader (Config config,
+  StreamReader (Config &config,
                 const size_t buffer_size,
                 const char _separator);
 
-  void memorymap(const string &filename,
-                 const bool quiet);
-  void memoryunmap();
-
-  /************ FUNCTIONS TO IMPLEMENT BASED ON FILES  ***********/
+  /************ FUNCTIONS TO IMPLEMENT BASED ON FILE FORMAT  ***********/
+  virtual void load() = 0;
   virtual inline bool operator >> (FastqStats &stats) = 0;
+  virtual ~StreamReader() = 0;
 };
 
-StreamReader::StreamReader(Config config,
+StreamReader::StreamReader(Config &config,
                            const size_t _buffer_size,
                            const char _separator) : 
   separator (_separator),
   buffer_size (_buffer_size) {
 
   // Allocates buffer to temporarily store reads
-  buffer.resize(buffer_size + 1);
+  buffer = new char[buffer_size + 1];
   buffer[buffer_size] = '\0';
 
   // Tile init
@@ -1474,7 +1508,7 @@ StreamReader::StreamReader(Config config,
   tile_cur= 0;
   tile_split_point = 0;
 
-  // Get useful data from config that allows us to possibly skip some analyses
+  // Get useful data from config that tells us which analyses to skip
   do_duplication = (config.limits["duplication"]["ignore"] == 0.0);
   do_kmer = (config.limits["kmer"]["ignore"] == 0.0);
   do_n_content = (config.limits["n_content"]["ignore"] == 0.0);
@@ -1485,50 +1519,14 @@ StreamReader::StreamReader(Config config,
   do_quality_sequence= (config.limits["quality_sequence"]["ignore"] == 0.0);
   do_tile = (config.limits["tile"]["ignore"] == 0.0);
   do_sequence_length = (config.limits["sequence_length"]["ignore"] == 0.0);
+
+  // Subclasses will use this to deflate if necessary
+  filename = config.filename;
 }
 
-// Open file
-void
-StreamReader::memorymap(const string &filename,
-                       const bool quiet) {
-  int fd = open(filename.c_str(), O_RDONLY, 0);
-  if (fd == -1)
-    throw runtime_error("failed to open fastq file: " + filename);
-
-  // get the file size
-  fstat(fd, &st);
-
-  // execute mmap
-  mmap_data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  close(fd);
-  if (mmap_data == MAP_FAILED)
-    throw runtime_error("failed to mmap fastq file: " + filename);
-
-  if (!quiet) {
-    // Display fastq size
-    cerr << "Fastq file size: ";
-    if (st.st_size > (1ll << 40))
-      cerr << st.st_size / ((1ll << 40)) << " Tb\n";
-    else if (st.st_size > (1ll << 30))
-      cerr << st.st_size / ((1ll << 30)) << " Gb\n";
-    else if (st.st_size > (1ll << 20))
-      cerr << st.st_size / ((1ll << 20)) << " Mb\n";
-    else if (st.st_size > (1ll << 10))
-      cerr << st.st_size / ((1ll << 10)) << " Kb\n";
-    else
-      cerr << st.st_size << " b\n";
-  }
-
-  // Initialize position pointer
-  curr = static_cast<char*>(mmap_data);
-  last = curr + st.st_size - 1;
-}
-
-void
-StreamReader::memoryunmap() {
-  munmap(mmap_data, st.st_size);
-  buffer.clear();
-  leftover_buffer.clear();
+// Makes sure that any subclass deletes the buffer
+StreamReader::~StreamReader () {
+  delete buffer;
 }
 
 // Fastqc only counts kmers once every 50 reads. We will do it once every 32
@@ -1571,7 +1569,7 @@ StreamReader::get_base() {
 // Keeps going forward while the current character is a separator
 inline void
 StreamReader::skip_separator() {
-  for(; *curr == separator; ++curr);
+  for(; *curr == separator; ++curr) {}
 }
 
 // Skips lines that are not relevant
@@ -1860,6 +1858,9 @@ StreamReader::read_quality_line(FastqStats &stats){
   read_from_buffer = true;
   leftover_ind = 0;
 
+  // For quality, we do not look for the separator, but rather for an explicit
+  // newline or EOF in case the file does not end with newline or we are getting
+  // decompressed strings from a stream
   for (; (*curr != '\n') && (curr < last); ++curr) {
     get_base();
 
@@ -1882,7 +1883,7 @@ StreamReader::read_quality_line(FastqStats &stats){
 
     // Flag to start reading and writing outside of buffer
     ++read_pos;
-    if(read_pos == buffer_size) {
+    if (read_pos == buffer_size) {
       read_from_buffer = false;
     }
   }
@@ -1902,9 +1903,10 @@ StreamReader::postprocess_fastq_record(FastqStats &stats) {
 
   // if reads are >75pb, truncate to 50
   if(read_pos <= stats.kDupReadMaxSize)
-    sequence_to_hash = buffer.substr(0, read_pos);
+    buffer[read_pos] = '\0';
   else
-    sequence_to_hash = buffer.substr(0, stats.kDupReadTruncateSize);
+    buffer[stats.kDupReadTruncateSize] = '\0';
+  sequence_to_hash = string(buffer);
 
   // New sequence found 
   if(stats.sequence_count.count(sequence_to_hash) == 0) {
@@ -1923,24 +1925,53 @@ StreamReader::postprocess_fastq_record(FastqStats &stats) {
   if (!tile_ignore)
     if (is_tile_line(stats) && tile_cur > 0)
       stats.tile_count[tile_cur]++;
-  
 }
 
 /*******************************************************/
 /*************** READ FASTQ RECORD *********************/
 /*******************************************************/
 class FastqReader : public StreamReader {
-  public:
-    FastqReader(const Config _config,
-                const size_t _buffer_size);
-    inline bool operator >> (FastqStats &stats);
+ private:
+  // for uncompressed
+  struct stat st;
+  void *mmap_data;
+
+ public:
+  FastqReader(Config &_config,
+              const size_t _buffer_size);
+
+  void load();
+  inline bool operator >> (FastqStats &stats);
+  ~FastqReader();
 };
 
 // Set fastq separator as \n
-FastqReader::FastqReader (Config config,
-                          const size_t _buffer_size) : 
-StreamReader(config, _buffer_size, '\n') {
+FastqReader::FastqReader (Config &_config,
+                          const size_t _buffer_size) :
+StreamReader(_config, _buffer_size, '\n') {
 
+}
+
+// Load fastq
+void
+FastqReader::load() {
+  // uncompressed fastq = memorymap
+  int fd = open(filename.c_str(), O_RDONLY, 0);
+  if (fd == -1)
+    throw runtime_error("failed to open fastq file: " + filename);
+
+  // get the file size
+  fstat(fd, &st);
+
+  // execute mmap
+  mmap_data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (mmap_data == MAP_FAILED)
+    throw runtime_error("failed to mmap fastq file: " + filename);
+
+  // Initialize position pointer
+  curr = static_cast<char*>(mmap_data);
+  last = curr + st.st_size - 1;
 }
 
 // Parses the particular fastq format
@@ -1961,22 +1992,53 @@ FastqReader::operator >> (FastqStats &stats) {
 
   // Returns if file should keep being checked
   return (curr < last - 1);
-
 }
 
+FastqReader::~FastqReader()  {
+  munmap(mmap_data, st.st_size);
+}
 /*******************************************************/
 /*************** READ SAM RECORD ***********************/
 /*******************************************************/
+
 class SamReader : public StreamReader {
-  public:
-    SamReader (const Config _config, const size_t _buffer_size);
-    inline bool operator >> (FastqStats &stats);
+ private:
+  // for uncompressed
+  struct stat st;
+  void *mmap_data;
+ public:
+  SamReader (Config &_config, 
+             const size_t _buffer_size);
+  void load();
+  inline bool operator >> (FastqStats &stats);
+  ~SamReader();
 };
 
-// set sam separator as space
-SamReader::SamReader (Config config,
+void
+SamReader::load() {
+  // uncompressed fastq = memorymap
+  int fd = open(filename.c_str(), O_RDONLY, 0);
+  if (fd == -1)
+    throw runtime_error("failed to open fastq file: " + filename);
+
+  // get the file size
+  fstat(fd, &st);
+
+  // execute mmap
+  mmap_data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (mmap_data == MAP_FAILED)
+    throw runtime_error("failed to mmap fastq file: " + filename);
+
+  // Initialize position pointer
+  curr = static_cast<char*>(mmap_data);
+  last = curr + st.st_size - 1;
+}
+
+// set sam separator as tab
+SamReader::SamReader (Config &_config,
                       const size_t _buffer_size) : 
-StreamReader(config, _buffer_size, '\t') {
+StreamReader(_config, _buffer_size, '\t') {
 
 }
 
@@ -2000,6 +2062,72 @@ SamReader::operator >> (FastqStats &stats) {
   return (curr < last - 1);
 
 }
+
+SamReader::~SamReader() {
+  munmap(mmap_data, st.st_size);
+}
+
+/*******************************************************/
+/*************** READ FASTQ GZ RCORD *******************/
+/*******************************************************/
+class GzFastqReader : public StreamReader {
+ private:
+   static const size_t chunk_size = 16384;
+   char gzbuf[chunk_size];
+   char peeker;
+   gzFile fileobj;
+ public:
+  GzFastqReader(Config &_config,
+                const size_t _buffer_size);
+  void load();
+  inline bool operator >> (FastqStats &stats);
+  ~GzFastqReader();
+};
+
+// Set fastq separator as \n
+GzFastqReader::GzFastqReader (Config &_config,
+                              const size_t _buffer_size) :
+StreamReader(_config, _buffer_size, '\n') {
+}
+
+// Load fastq
+void
+GzFastqReader::load() {
+  fileobj = gzopen(filename.c_str(), "r");
+}
+
+// Parses the particular fastq format
+inline bool
+GzFastqReader::operator >> (FastqStats &stats) {
+  curr = gzgets (fileobj, gzbuf, chunk_size);
+  if (gzeof(fileobj)) return false;
+  read_tile_line(stats);
+  skip_separator();
+
+  curr = gzgets (fileobj, gzbuf, chunk_size);
+  read_sequence_line(stats);
+  skip_separator();
+
+  curr = gzgets (fileobj, gzbuf, chunk_size);
+  read_fast_forward_line();
+  skip_separator();
+
+  curr = gzgets (fileobj, gzbuf, chunk_size);
+  last = curr + strlen(curr);
+  read_quality_line(stats);
+  skip_separator();
+  postprocess_fastq_record(stats);
+
+  // Successful read, increment number in stats
+  stats.num_reads++;
+  return !gzeof(fileobj);
+}
+
+GzFastqReader::~GzFastqReader() {
+  gzclose_r (fileobj);
+}
+
+
 /*******************************************************/
 /*************** HTML FACTORY***** *********************/
 /*******************************************************/
@@ -2011,39 +2139,29 @@ struct HTMLFactory {
                                       const string &data);
   // Function to replace template placeholders with data
   void make_basic_statistics(const FastqStats &stats,
-                             const Config &config);
+                             Config &config);
 
-  void make_position_quality_data(const FastqStats &stats,
-                                  const Config &config);
+  void make_position_quality_data(const FastqStats &stats);
 
-  void make_tile_quality_data(const FastqStats &stats,
-                                  const Config &config);
+  void make_tile_quality_data(const FastqStats &stats);
 
+  void make_sequence_quality_data(const FastqStats &stats);
 
-  void make_sequence_quality_data(const FastqStats &stats,
-                                  const Config &config);
+  void make_base_sequence_content_data(const FastqStats &stats);
 
-  void make_base_sequence_content_data(const FastqStats &stats,
-                                       const Config &config);
+  void make_sequence_gc_content_data(const FastqStats &stats);
 
-  void make_sequence_gc_content_data(const FastqStats &stats,
-                                     const Config &config);
-  void make_base_n_content_data(const FastqStats &stats,
-                                const Config &config);
+  void make_base_n_content_data(const FastqStats &stats);
 
-  void make_sequence_length_data(const FastqStats &stats,
-                                 const Config &config);
+  void make_sequence_length_data(const FastqStats &stats);
 
-  void make_sequence_duplication_data(const FastqStats &stats,
-                                      const Config &config);
+  void make_sequence_duplication_data(const FastqStats &stats);
 
   void make_overrepresented_sequences_data(const FastqStats &stats,
-                                           const Config &config);
-
+                                           Config &config);
 
   void make_adapter_content_data(FastqStats &stats,
-                                 const Config &config);
-
+                                 Config &config);
 };
 
 HTMLFactory::HTMLFactory (string filepath) {
@@ -2070,7 +2188,7 @@ HTMLFactory::replace_placeholder_with_data (const string &placeholder,
 
 void 
 HTMLFactory::make_basic_statistics(const FastqStats &stats,
-                                   const Config &config) {
+                                   Config &config) {
   string placeholder = "{{BASICSTATSDATA}}";
   ostringstream data;
   data << "<table><thead><tr><th>Measure</th><th>Value</th></tr></thead><tbody>";
@@ -2095,8 +2213,7 @@ HTMLFactory::make_basic_statistics(const FastqStats &stats,
 }
 
 void 
-HTMLFactory::make_position_quality_data (const FastqStats &stats,
-                                         const Config &config) {
+HTMLFactory::make_position_quality_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{SEQBASEQUALITYDATA}}";
 
@@ -2136,8 +2253,7 @@ HTMLFactory::make_position_quality_data (const FastqStats &stats,
 }
 
 void
-HTMLFactory::make_tile_quality_data (const FastqStats &stats,
-                                     const Config &config) {
+HTMLFactory::make_tile_quality_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{TILEQUALITYDATA}}";
   // X: position
@@ -2192,8 +2308,7 @@ HTMLFactory::make_tile_quality_data (const FastqStats &stats,
 }
 
 void 
-HTMLFactory::make_sequence_quality_data (const FastqStats &stats,
-                                         const Config &config) {
+HTMLFactory::make_sequence_quality_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{SEQQUALITYDATA}}";
 
@@ -2219,8 +2334,7 @@ HTMLFactory::make_sequence_quality_data (const FastqStats &stats,
 
 
 void 
-HTMLFactory::make_base_sequence_content_data (const FastqStats &stats,
-                                              const Config &config) {
+HTMLFactory::make_base_sequence_content_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{BASESEQCONTENTDATA}}";
 
@@ -2284,8 +2398,7 @@ HTMLFactory::make_base_sequence_content_data (const FastqStats &stats,
 }
 
 void 
-HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats,
-                                            const Config &config) {
+HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{SEQGCCONTENTDATA}}";
 
@@ -2327,8 +2440,7 @@ HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats,
 }
 
 void 
-HTMLFactory::make_base_n_content_data (const FastqStats &stats,
-                                            const Config &config) {
+HTMLFactory::make_base_n_content_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{BASENCONTENTDATA}}";
 
@@ -2356,8 +2468,7 @@ HTMLFactory::make_base_n_content_data (const FastqStats &stats,
 }
 
 void 
-HTMLFactory::make_sequence_length_data (const FastqStats &stats,
-                                         const Config &config) {
+HTMLFactory::make_sequence_length_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{SEQLENDATA}}";
 
@@ -2403,8 +2514,7 @@ HTMLFactory::make_sequence_length_data (const FastqStats &stats,
 
 
 void 
-HTMLFactory::make_sequence_duplication_data (const FastqStats &stats,
-                                             const Config &config) {
+HTMLFactory::make_sequence_duplication_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{SEQDUPDATA}}";
 
@@ -2449,7 +2559,7 @@ HTMLFactory::make_sequence_duplication_data (const FastqStats &stats,
 
 void 
 HTMLFactory::make_overrepresented_sequences_data(const FastqStats &stats,
-                                                 const Config &config) {
+                                                 Config &config) {
   string placeholder = "{{OVERREPSEQDATA}}";
   ostringstream data;
 
@@ -2478,7 +2588,7 @@ HTMLFactory::make_overrepresented_sequences_data(const FastqStats &stats,
 
 void
 HTMLFactory::make_adapter_content_data (FastqStats &stats,
-                                        const Config &config) {
+                                        Config &config) {
   string placeholder = "{{ADAPTERDATA}}";
   ostringstream data;
 
@@ -2530,13 +2640,11 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
 int main(int argc, const char **argv) {
   clock_t begin = clock();  // register ellapsed time
   /****************** COMMAND LINE OPTIONS ********************/
-  // file containing contaminants to be checked for
-
-  // Length of k-mers to count. Grows memory exponentially so it is bound to 10
   const size_t MAX_KMER_SIZE = 10;
   bool help = false;
   bool version = false;
   Config config;
+
   cerr << "Parsing options\n";
   OptionParser opt_parse(strip_path(argv[0]),
                          "A high throughput sequence QC analysis tool",
@@ -2638,15 +2746,9 @@ int main(int argc, const char **argv) {
   /****************** BEGIN PROCESSING CONFIG ******************/
   cerr << "Reading config files\n";
   config.filename = leftover_args.front();
-  config.read_limits();
-  config.read_adapters();
-  config.read_contaminants();
-  if (config.format == "") {
-    if (endswith(config.filename, "sam"))
-      config.format = "sam";
-    else 
-      config.format = "fastq";
-  }
+  config.setup();  // define filename, read limits, adapters, contaminants, etc
+
+
   /****************** END PROCESSING CONFIG *******************/
   if (!config.quiet)
     cerr << "Started reading file " << config.filename << ".\n";
@@ -2654,20 +2756,26 @@ int main(int argc, const char **argv) {
   // Allocates vectors to summarize data
   FastqStats stats(config);
 
-  // Initializes a reader given the maximum number of bases to summarie
+  // Initializes a reader given the file format
   StreamReader *in;
-  if (config.format == "sam")
+  if (config.format == "sam") {
+    cerr << "reading file as sam format\n";
     in = new SamReader (config, stats.kNumBases);
-  else
+  }
+  else if (config.compressed) {
+    cerr << "reading file as gzipped fastq format\n";
+    in = new GzFastqReader (config, stats.kNumBases);
+  }
+  else {
+    cerr << "reading file as uncompressed fastq format\n";
     in = new FastqReader (config, stats.kNumBases);
-
-  in->memorymap(config.filename, config.quiet);
+  }
+  in->load();
 
   // Read record by record
   const size_t num_reads_to_log = 1000000;
   size_t next_read = num_reads_to_log;
-  
-  cerr << "started streaiming\n";
+
   while ((*in) >> stats) {
     if(!config.quiet)
       // Equality is faster than modular arithmetics
@@ -2679,8 +2787,8 @@ int main(int argc, const char **argv) {
   }
 
   // Free memory
-  in->memoryunmap();
   delete in;
+
   if (!config.quiet)
     cerr << "Finished reading file.\n";
 
@@ -2707,16 +2815,16 @@ int main(int argc, const char **argv) {
   /************************ WRITE TO HTML *****************************/
   if (!config.quiet)
     cerr << "Making html.\n";
-  HTMLFactory factory ("html/template.html");
+  HTMLFactory factory ("Configuration/template.html");
   factory.make_basic_statistics (stats, config);
-  factory.make_position_quality_data (stats, config);
-  factory.make_tile_quality_data (stats, config);
-  factory.make_sequence_quality_data (stats, config);
-  factory.make_base_sequence_content_data (stats, config);
-  factory.make_sequence_gc_content_data (stats, config);
-  factory.make_base_n_content_data (stats, config);
-  factory.make_sequence_length_data (stats, config);
-  factory.make_sequence_duplication_data (stats, config);
+  factory.make_position_quality_data (stats);
+  factory.make_tile_quality_data (stats);
+  factory.make_sequence_quality_data (stats);
+  factory.make_base_sequence_content_data (stats);
+  factory.make_sequence_gc_content_data (stats);
+  factory.make_base_n_content_data (stats);
+  factory.make_sequence_length_data (stats);
+  factory.make_sequence_duplication_data (stats);
   factory.make_overrepresented_sequences_data (stats, config);
   factory.make_adapter_content_data (stats, config);
   ofstream html (config.outfile + ".html");
