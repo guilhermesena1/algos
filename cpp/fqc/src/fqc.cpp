@@ -38,6 +38,8 @@
 #include <utility>
 #include <zlib.h>
 
+#include <htslib/sam.h>
+
 #include "smithlab_utils.hpp"
 #include "smithlab_os.hpp"
 #include "OptionParser.hpp"
@@ -66,7 +68,7 @@ using std::ostringstream;
 
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
- *************************g***********************************/
+ *************************************************************/
 
 // converts 64 bit integer to a sequence string by reading 2 bits at a time and
 // converting back to ACTG
@@ -318,8 +320,6 @@ Config::setup() {
     read_adapters();
   if (limits["adapter"]["ignore"] != 0.0)
     read_contaminants();
-
-
 }
 
 void
@@ -330,7 +330,7 @@ Config::define_file_format() {
       compressed = false;
     } 
     else if (endswith(filename, "bam")) {
-      format = "sam";
+      format = "bam";
       compressed = true;
     }
     else {
@@ -483,7 +483,6 @@ Config::get_matching_contaminant (string seq) const {
       }
     }
   }
-  
   return "No Hit";
 }
 /*************************************************************
@@ -789,7 +788,6 @@ FastqStats::summarize(Config &config) {
       if (read_length_freq[i] > 0)
         if (min_read_length == 0)
           min_read_length = i;
-        
     }
     else
       cumulative_sum += long_read_length_freq[i - kNumBases];
@@ -2033,6 +2031,8 @@ SamReader::load() {
   // Initialize position pointer
   curr = static_cast<char*>(mmap_data);
   last = curr + st.st_size - 1;
+
+  // TODO (gui): skip sam header if it exists
 }
 
 // set sam separator as tab
@@ -2100,7 +2100,10 @@ GzFastqReader::load() {
 inline bool
 GzFastqReader::operator >> (FastqStats &stats) {
   curr = gzgets (fileobj, gzbuf, chunk_size);
-  if (gzeof(fileobj)) return false;
+
+  // We need to check here if we actually got a new line
+  if (gzeof(fileobj)) 
+    return false;
   read_tile_line(stats);
   skip_separator();
 
@@ -2127,9 +2130,97 @@ GzFastqReader::~GzFastqReader() {
   gzclose_r (fileobj);
 }
 
+/*******************************************************/
+/*************** READ BAM RECORD ***********************/
+/*******************************************************/
+
+class BamReader : public StreamReader {
+ private:
+  htsFile *hts;
+  bam_hdr_t *hdr;
+  bam1_t *b;
+  int rd_ret, fmt_ret;
+
+ public:
+  BamReader (Config &_config, 
+             const size_t _buffer_size);
+  void load();
+  inline bool operator >> (FastqStats &stats);
+  ~BamReader();
+};
+
+void
+BamReader::load() {
+  if (!(hts = hts_open (filename.c_str(), "r")))
+    throw runtime_error ("cannot load bam file : " + filename);
+
+  if (!(hdr = sam_hdr_read(hts)))
+     throw runtime_error("failed to read header from file: " + filename);
+
+  if (!(b = bam_init1()))
+     throw runtime_error("failed to read record from file: " + filename);
+
+}
+
+// set sam separator as tab
+BamReader::BamReader (Config &_config,
+                      const size_t _buffer_size) : 
+StreamReader(_config, _buffer_size, '\t') {
+  rd_ret = 0;
+
+}
+
+inline bool
+BamReader::operator >> (FastqStats &stats) {
+  if ((rd_ret = sam_read1(hts, hdr, b)) >= 0) {
+    fmt_ret = 0;
+    if ((fmt_ret = sam_format1(hdr, b, &hts->line)) > 0) {
+      // define char* values for processing lines char by char
+      curr = hts->line.s;
+      last = curr + strlen (hts->line.s);
+
+      // Now read it as regular sam
+      read_tile_line(stats);
+      skip_separator();
+      for (size_t i = 0; i < 8; ++i) {
+        read_fast_forward_line();
+        skip_separator();
+      }
+      read_sequence_line(stats);
+      read_quality_line(stats);
+      postprocess_fastq_record(stats);
+
+      stats.num_reads++;
+      return true;
+    } else {
+      throw runtime_error ("failed reading record from : " + filename);
+    }
+
+    return false;
+  }
+  // Returns if file should keep being checked
+  return false;
+}
+
+BamReader::~BamReader() {
+  if (hdr) {
+    bam_hdr_destroy(hdr);
+    hdr = 0;
+  }
+
+  if (b) {
+    bam_destroy1(b);
+    b = 0;
+  }
+
+  if (hts) {
+    hts_close(hts);
+    hts = 0;
+  }
+}
 
 /*******************************************************/
-/*************** HTML FACTORY***** *********************/
+/*************** HTML FACTORY **************************/
 /*******************************************************/
 struct HTMLFactory {
  public:
@@ -2165,7 +2256,7 @@ struct HTMLFactory {
 };
 
 HTMLFactory::HTMLFactory (string filepath) {
-  sourcecode ="";
+  sourcecode = "";
   ifstream in(filepath);
   if(!in)
     throw runtime_error ("HTML layout not found: " + filepath);
@@ -2331,7 +2422,6 @@ HTMLFactory::make_sequence_quality_data (const FastqStats &stats) {
 
   replace_placeholder_with_data (placeholder, data.str());
 }
-
 
 void 
 HTMLFactory::make_base_sequence_content_data (const FastqStats &stats) {
@@ -2743,10 +2833,10 @@ int main(int argc, const char **argv) {
     return EXIT_SUCCESS;
   }
 
+  config.filename = leftover_args.front();
   /****************** BEGIN PROCESSING CONFIG ******************/
   cerr << "Reading config files\n";
-  config.filename = leftover_args.front();
-  config.setup();  // define filename, read limits, adapters, contaminants, etc
+  config.setup();  // define file type, read limits, adapters, contaminants, etc
 
 
   /****************** END PROCESSING CONFIG *******************/
@@ -2762,6 +2852,11 @@ int main(int argc, const char **argv) {
     cerr << "reading file as sam format\n";
     in = new SamReader (config, stats.kNumBases);
   }
+  else if (config.format == "bam") {
+    cerr << "reading file as bam format\n";
+    in = new BamReader (config, stats.kNumBases);
+  }
+
   else if (config.compressed) {
     cerr << "reading file as gzipped fastq format\n";
     in = new GzFastqReader (config, stats.kNumBases);
@@ -2777,13 +2872,14 @@ int main(int argc, const char **argv) {
   size_t next_read = num_reads_to_log;
 
   while ((*in) >> stats) {
-    if(!config.quiet)
+    if (!config.quiet) {
       // Equality is faster than modular arithmetics
       if (stats.num_reads == next_read) {
         cerr << "Processed " << stats.num_reads / num_reads_to_log
              << "M reads.\n";
         next_read += num_reads_to_log;
       }
+    }
   }
 
   // Free memory
@@ -2795,8 +2891,9 @@ int main(int argc, const char **argv) {
   if (!config.quiet)
     cerr << "Summarizing data.\n";
 
-  // This function has to be called before writing to output
-   stats.summarize(config);
+  // This function has to be called before writing to output. This is where we
+  // calculate all the summary statistics that will be written to output. 
+  stats.summarize(config);
 
   /************************ WRITE TO OUTPUT *****************************/
   if (!config.quiet)
