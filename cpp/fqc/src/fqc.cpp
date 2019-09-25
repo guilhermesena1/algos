@@ -2177,7 +2177,7 @@ BamReader::operator >> (FastqStats &stats) {
     if ((fmt_ret = sam_format1(hdr, b, &hts->line)) > 0) {
       // define char* values for processing lines char by char
       curr = hts->line.s;
-      last = curr + strlen (hts->line.s);
+      last = curr + strlen (hts->line.s) - 1;
 
       // Now read it as regular sam
       read_tile_line(stats);
@@ -2190,6 +2190,7 @@ BamReader::operator >> (FastqStats &stats) {
       read_quality_line(stats);
       postprocess_fastq_record(stats);
 
+      cerr << buffer << "\n";
       stats.num_reads++;
       return true;
     } else {
