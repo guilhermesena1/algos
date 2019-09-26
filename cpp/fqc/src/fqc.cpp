@@ -2649,15 +2649,14 @@ HTMLFactory::make_sequence_length_data (const FastqStats &stats) {
         val = stats.read_length_freq[i];
     } else {
       if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
-        val = stats.read_length_freq[i];
+        val = stats.long_read_length_freq[i - stats.kNumBases];
     }
 
     if (val > 0) {
-      data << i+1;
-      if(first_seen)
+      if (first_seen)
         data << ",";
-      else
-        first_seen = true;
+      data << "\"" << i+1 << " bp\"";
+      first_seen = true;
     }
   }
 
@@ -2665,24 +2664,47 @@ HTMLFactory::make_sequence_length_data (const FastqStats &stats) {
   data << "], y : [";
   first_seen = false;
   for (size_t i = 0; i < stats.max_read_length; ++i) {
-    val = 0 ;
+    val = 0;
     if (i < stats.kNumBases){
       if (stats.read_length_freq[i] > 0)
         val = stats.read_length_freq[i];
     } else {
       if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
-        val = stats.read_length_freq[i];
+        val = stats.long_read_length_freq[i - stats.kNumBases];
     }
 
     if (val > 0) {
-      data << val;
-      if(first_seen)
+      if (first_seen)
         data << ",";
-      else
-        first_seen = true;
+      data << val;
+      first_seen = true;
     }
   }
-  data << "], type: 'bar', marker : {color : 'red'}, "
+
+  // Put the sequence value in the text
+  data << "], text : [";
+  first_seen = false;
+  for (size_t i = 0; i < stats.max_read_length; ++i) {
+    val = 0;
+    if (i < stats.kNumBases){
+
+      if (stats.read_length_freq[i] > 0)
+        val = stats.read_length_freq[i];
+    } else {
+      if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
+        val = stats.long_read_length_freq[i - stats.kNumBases];
+    }
+
+    if (val > 0) {
+      if (first_seen)
+        data << ",";
+      data << i+1;
+      first_seen = true;
+    }
+  }
+
+
+  data << "], type: 'bar', marker : {color : 'rgba(55,128,191,1.0)', line : {width : 2}}, "
        << "name : 'Sequence length distribution'}";
 
   replace_placeholder_with_data (placeholder, data.str());
