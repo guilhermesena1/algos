@@ -79,7 +79,7 @@ using std::ctime;
  *************************************************************/
 
 static inline void
-LogProcess (const string &s) {
+log_process (const string &s) {
   auto tmp = system_clock::to_time_t(system_clock::now());
   string time_fmt = string(ctime(&tmp));
   time_fmt.pop_back();
@@ -155,27 +155,27 @@ double get_corrected_count (size_t count_at_limit,
   // sequence with this duplication level within the first count_at_limit 
   // sequences of num_obs.  This is easier than calculating
   // the probability of seeing it.
-  double pNotSeeingAtLimit = 1.0;
+  double p_not_seeing = 1.0;
 
   // To save doing long calculations which are never going to produce anything meaningful
   // we'll set a limit to our p-value calculation.  This is the probability below which we
   // won't increase our count by 0.01 of an observation.  Once we're below this we stop caring
   // about the corrected value since it's going to be so close to the observed value that
   // we can just return that instead.
-  double limitOfCaring = 1.0 - (num_obs/(num_obs + 0.01));
+  double limit_of_caring = 1.0 - (num_obs/(num_obs + 0.01));
   for (size_t i = 0; i < count_at_limit; ++i) {
-    pNotSeeingAtLimit *= static_cast<double>((num_reads-i)-dup_level) /
+    p_not_seeing *= static_cast<double>((num_reads-i)-dup_level) /
                          static_cast<double>(num_reads-i);
 
-    if (pNotSeeingAtLimit < limitOfCaring) {
-      pNotSeeingAtLimit = 0;
+    if (p_not_seeing < limit_of_caring) {
+      p_not_seeing = 0;
       break;
     }
   }
 
   // Now we can assume that the number we observed can be 
   // scaled up by this proportion
-  return num_obs/(1 - pNotSeeingAtLimit);
+  return num_obs/(1 - p_not_seeing);
 }
 
 // Function to calculate the deviation of a histogram with 100 bins from a
@@ -218,7 +218,7 @@ sum_deviation_from_normal (const array <size_t, 101> &gc_content,
     ans += fabs(gc_content[i] - theoretical[i]);
   
   // Fractional deviation
-  return ans / num_reads;
+  return 100.0 * ans / num_reads;
 }
 
 /*************************************************************
@@ -483,22 +483,34 @@ Config::read_contaminants(){
   in.close();
 }
 
+// Find contaminant with highest overlap with sequence or return "No Hit" if
+// there is none
 string
 Config::get_matching_contaminant (string seq) const {
+  size_t best = 0;
+  string ret;
   for (auto v : contaminants) {
     if (seq.size() > v.second.size()) {
 
       // contaminant contained in sequence
       if(seq.find(v.second) != string::npos) {
-        return v.first;
+        if (v.second.size() > best) {
+          best = v.second.size();
+          ret = v.first;
+        }
       }
     } else {
       // sequence contained in contaminant
       if(v.second.find(seq) != string::npos) {
+        // In this case this is the best possible match so return it
         return v.first;
       }
     }
   }
+
+  // If any sequence is a match, return the best one
+  if (best > 0)
+    return ret;
   return "No Hit";
 }
 /*************************************************************
@@ -507,7 +519,7 @@ Config::get_matching_contaminant (string seq) const {
 
 struct FastqStats {
   // number of bases for static allocation. 
-  static const size_t kNumBases = 1000;
+  static const size_t kNumBases = 200;
 
   // Value to subtract quality characters to get the actual quality value
   static const size_t kBaseQuality = 33;  // The ascii for the lowest quality
@@ -521,7 +533,7 @@ struct FastqStats {
   static const size_t kNumNucleotides = 4;  // A = 00,C = 01,T = 10,G = 11
 
   // maximum tile value
-  static const size_t kNumMaxTiles = 65536;
+  static const size_t kNumMaxTiles = 16384;
 
   // Maximum number of bases for which to do kmer statistics
   static const size_t kKmerMaxBases = 500;
@@ -551,6 +563,8 @@ struct FastqStats {
   size_t total_bases;  // sum of all bases in all reads
   size_t avg_read_length;  // average of all read lengths
   size_t num_reads;  // total number of lines read
+  size_t num_reads_kmer; // number of reads in which kmer counts was performed
+  size_t num_reads_tile; // number of reads in which tile count was performed
   size_t min_read_length; // minimum read length seen
   size_t max_read_length;  // total number of lines read
   size_t num_poor;  // reads whose average quality was <= poor
@@ -670,7 +684,6 @@ struct FastqStats {
          pass_sequence_length_distribution,
          pass_overrepresented_sequences,
          pass_duplicate_sequences,
-         pass_kmer_content,
          pass_adapter_content;
 
     /**************** FUNCTIONS ****************************/
@@ -699,6 +712,8 @@ FastqStats::FastqStats(const Config &config) {
   avg_read_length = 0;
   avg_gc = 0;
   num_reads = 0;
+  num_reads_kmer = 0;
+  num_reads_tile = 0;
   min_read_length = 0;
   max_read_length = 0;
   num_poor = 0;
@@ -920,7 +935,6 @@ FastqStats::summarize(Config &config) {
   }
 
   /******************* PER SEQUENCE QUALITY SCORE **********************/
-
   pass_per_sequence_quality_scores = "pass";
   size_t mode_val = 0;
   size_t mode_ind = 0;
@@ -938,9 +952,8 @@ FastqStats::summarize(Config &config) {
     pass_per_sequence_quality_scores = "fail";
 
   /******************* PER BASE SEQUENCE CONTENT **********************/
-
   pass_per_base_sequence_content = "pass";
-  size_t a, t, g, c, n;
+  double a, t, g, c, n;
   double total;
   double max_diff = 0.0;
   for (size_t i = 0; i < max_read_length; ++i) {
@@ -960,18 +973,23 @@ FastqStats::summarize(Config &config) {
 
     // turns above values to percent
     total = static_cast<double>(a + c + t + g + n);
+    a = 100.0*a / total;
+    c = 100.0*c / total;
+    t = 100.0*t / total;
+    g = 100.0*g / total;
+    n = 100.0*n / total;
     if (i < kNumBases) {
-      g_pct[i] = 100.0*g / total;
-      a_pct[i] = 100.0*a / total;
-      t_pct[i] = 100.0*t / total;
-      c_pct[i] = 100.0*c / total;
-      n_pct[i] = 100.0*n / total;
+      g_pct[i] = g;
+      a_pct[i] = a;
+      t_pct[i] = t;
+      c_pct[i] = c;
+      n_pct[i] = n;
     } else {
-      long_g_pct.push_back(100.0*g / total);
-      long_a_pct.push_back(100.0*a / total);
-      long_t_pct.push_back(100.0*t / total);
-      long_c_pct.push_back(100.0*c / total);
-      long_n_pct.push_back(100.0*n / total);
+      long_g_pct.push_back(g);
+      long_a_pct.push_back(a);
+      long_t_pct.push_back(t);
+      long_c_pct.push_back(c);
+      long_n_pct.push_back(n);
     }
 
     max_diff = max(max_diff, fabs(a-c));
@@ -982,9 +1000,9 @@ FastqStats::summarize(Config &config) {
     max_diff = max(max_diff, fabs(t-g));
 
     if (pass_per_base_sequence_content != "fail") {
-      if (max_diff > config.limits["sequence"]["error"] / 100.0)
+      if (max_diff > config.limits["sequence"]["error"])
         pass_per_base_sequence_content = "fail";
-      else if (max_diff > config.limits["sequence"]["warn"] / 100.0)
+      else if (max_diff > config.limits["sequence"]["warn"])
         pass_per_base_sequence_content = "warn";
     }
   }
@@ -1103,9 +1121,19 @@ FastqStats::summarize(Config &config) {
 
   // Keep only sequences that pass the input cutoff
   for (auto it = sequence_count.begin(); it != sequence_count.end(); ++it) {
-    if (it->second > num_reads * config.kOverrepMinFrac)
-      overrep_sequences.push_back (make_pair(it->first,
-                                             it->second));
+    if (it->second > num_reads * config.kOverrepMinFrac) {
+      overrep_sequences.push_back (*it);
+    }
+
+    // implment pass warn fail for overrep sequences
+    if (pass_overrepresented_sequences != "fail") {
+      // get percentage that overrep reads represent
+      double pct = 100.0 * it->second / num_reads;
+      if (pct > config.limits["overrepresented"]["error"])
+        pass_overrepresented_sequences = "fail";
+      else if (pct > config.limits["overrepresented"]["warn"])
+        pass_overrepresented_sequences = "warn";
+    }
   }
 
   // Sort strings by frequency
@@ -1116,7 +1144,7 @@ FastqStats::summarize(Config &config) {
   /************** ADAPTER CONTENT ******************************/
   pass_adapter_content = "pass";
 
-  // Cumulative count of kmers by position
+  // Cumulative count of adapter kmers by position
   size_t jj;
   for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
     if (cumulative_read_length_freq[i] > 0) {
@@ -1143,7 +1171,11 @@ FastqStats::summarize(Config &config) {
     if (cumulative_read_length_freq[i] > 0) {
       jj = 0;
       for (auto v : config.adapters) {
-        kmer_by_base[i][jj] = kmer_by_base[i][jj] * 100.0 / num_reads;
+
+        cerr << v.first << "\t" << i << "\t" << kmer_by_base[i][jj] << "\n";
+        kmer_by_base[i][jj] = kmer_by_base[i][jj] * 100.0 / num_reads_kmer;
+
+        // Update pass warn fail
         if (pass_adapter_content != "fail") {
           if (kmer_by_base[i][jj] > config.limits["adapter"]["error"])
             pass_adapter_content = "fail";
@@ -1154,9 +1186,6 @@ FastqStats::summarize(Config &config) {
       }
     }
   }
-
-  /************** KMER CONTENT *********************************/
-  pass_kmer_content = "pass";
 
   /************** PER TILE SEQUENCE QUALITY ********************/
   pass_per_tile_sequence_quality = "pass";
@@ -1424,6 +1453,12 @@ class StreamReader{
        do_tile,
        do_sequence_length;
 
+  // keep track of reads for which to do kmer and tile count
+  const size_t num_reads_for_kmer = 50;
+  const size_t num_reads_for_tile = 10;
+  size_t next_kmer_read;
+  size_t next_tile_read;
+
   // Whether or not to get bases from buffer when reading quality line
   bool read_from_buffer;
 
@@ -1469,14 +1504,9 @@ class StreamReader{
 
 
   /************ FUNCTIONS TO PROCESS READS AND BASES ***********/
+  // gets and puts bases from and to buffer
   inline void put_base();  // puts base in buffer or leftover
   inline void get_base();  // gets base from buffer or leftover
-
-  // Check if it is a line that is done only occasionally
-  inline bool is_tile_line(const FastqStats &stats);
-  inline bool is_kmer_line(const FastqStats &stats);
-
-  // gets and puts bases from and to buffer
 
   inline void get_tile_split_position();
   inline void get_tile_value();
@@ -1521,7 +1551,10 @@ StreamReader::StreamReader(Config &config,
   tile_ignore= false;
   tile_cur= 0;
   tile_split_point = 0;
+  next_tile_read = 0;
 
+  // kmer init
+  next_kmer_read = 0;
   // Get useful data from config that tells us which analyses to skip
   do_duplication = (config.limits["duplication"]["ignore"] == 0.0);
   do_kmer = (config.limits["kmer"]["ignore"] == 0.0);
@@ -1541,12 +1574,6 @@ StreamReader::StreamReader(Config &config,
 // Makes sure that any subclass deletes the buffer
 StreamReader::~StreamReader () {
   delete buffer;
-}
-
-// Fastqc only counts kmers once every 50 reads. We will do it once every 32
-inline bool
-StreamReader::is_kmer_line(const FastqStats &stats) {
-  return (!(stats.num_reads & 31));
 }
 
 /*******************************************************/
@@ -1595,13 +1622,6 @@ StreamReader::read_fast_forward_line(){
 /*******************************************************/
 /*************** TILE PROCESSING ***********************/
 /*******************************************************/
-// Fastqc does tile statistics once every 10 lines, 
-// we will do once every 8 so we can use bits instead of module arithmetic
-inline bool
-StreamReader::is_tile_line(const FastqStats &stats) {
-  return (!(stats.num_reads & 7));
-}
-
 // Parse the comment 
 inline void 
 StreamReader::get_tile_split_position(){
@@ -1656,7 +1676,7 @@ StreamReader::read_tile_line(FastqStats &stats){
   }
 
   // Fast forward if this is not a tile line
-  if (!is_tile_line(stats)) {
+  if (stats.num_reads != next_tile_read) {
     read_fast_forward_line();
     return;
   }
@@ -1693,7 +1713,7 @@ StreamReader::process_sequence_base_from_buffer(FastqStats &stats) {
     cur_gc_count += (base_ind & 1);
     stats.base_count[(read_pos << stats.kBitShiftNucleotide) | base_ind]++;
 
-    if (is_kmer_line(stats)) {
+    if (stats.num_reads == next_kmer_read) {
       if (read_pos < stats.kKmerMaxBases) {
         cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
 
@@ -1826,7 +1846,7 @@ StreamReader::process_quality_base_from_buffer(FastqStats &stats) {
 
   // Tile processing
   if (!tile_ignore)
-    if (is_tile_line(stats) && tile_cur > 0) {
+    if ((stats.num_reads == next_tile_read) && tile_cur > 0) {
       stats.tile_position_quality[(read_pos << stats.kBitShiftTile) | tile_cur]
           += quality_value;
 
@@ -1855,7 +1875,7 @@ StreamReader::process_quality_base_from_leftover(FastqStats &stats) {
 
   // Tile processing
   if (!tile_ignore)
-    if (is_tile_line(stats) && tile_cur > 0) {
+    if ((stats.num_reads == next_tile_read) && tile_cur > 0) {
 
       stats.long_tile_position_quality[(leftover_ind << stats.kBitShiftTile) | tile_cur]
           += quality_value;
@@ -1937,8 +1957,18 @@ StreamReader::postprocess_fastq_record(FastqStats &stats) {
 
   // counts tile if applicable
   if (!tile_ignore)
-    if (is_tile_line(stats) && tile_cur > 0)
-      stats.tile_count[tile_cur]++;
+    if (stats.num_reads == next_tile_read) {
+      next_tile_read += num_reads_for_tile;
+      stats.num_reads_tile++;
+      if (tile_cur > 0)
+        stats.tile_count[tile_cur]++;
+    }
+
+  // I counted kmers here so register that I did so
+  if (stats.num_reads == next_kmer_read) {
+    next_kmer_read += num_reads_for_kmer;
+    stats.num_reads_kmer++;
+  }
 }
 
 /*******************************************************/
@@ -2717,15 +2747,10 @@ HTMLFactory::make_sequence_duplication_data (const FastqStats &stats) {
   const string placeholder = "{{SEQDUPDATA}}";
 
   // non-deduplicated
-  data << "{x : [";
-  for (size_t i = 0; i < 16; ++i) {
-    data << i + 1;
-    if (i < 15)
-      data << ", ";
-  }
+  data << "{x : [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]";
 
   // total percentage in each bin
-  data << "], y : [";
+  data << ", y : [";
   for (size_t i = 0; i < 16; ++i) {
     data << stats.percentage_total[i];
 
@@ -2736,15 +2761,11 @@ HTMLFactory::make_sequence_duplication_data (const FastqStats &stats) {
        << "name : 'total sequences'}";
 
   // deduplicated
-  data << ", {x : [";
-  for (size_t i = 0; i < 16; ++i) {
-    data << i + 1;
-    if (i < 15)
-      data << ", ";
-  }
+  data << ", {x : [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]";
+
 
   // total percentage in deduplicated
-  data << "], y : [";
+  data << ", y : [";
   for (size_t i = 0; i < 16; ++i) {
     data << stats.percentage_deduplicated[i];
 
@@ -2752,7 +2773,7 @@ HTMLFactory::make_sequence_duplication_data (const FastqStats &stats) {
       data << ", ";
   }
   data << "], type: 'line', line : {color : 'red'}, "
-       << "name : 'Deduplicated sequences'}";
+       << "name : 'total sequences'}";
   replace_placeholder_with_data (placeholder, data.str());
 }
 
@@ -2839,28 +2860,34 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
 
 // Read any file type until the end and logs progress
 template <typename T> void
-read_stream_into_stats(T &in, FastqStats &stats, bool quiet) {
+read_stream_into_stats(T &in, 
+                       FastqStats &stats, 
+                       Config &config) {
   in.load();
   // Read record by record
   const size_t num_reads_to_log = 1000000;
   size_t next_read = num_reads_to_log;
 
   while (in >> stats) {
-    if (!quiet) {
+    if (!config.quiet) {
       // Equality is faster than modular arithmetics
       if (stats.num_reads == next_read) {
-        LogProcess ("Processed " +
+        log_process ("Processed " +
                     to_string(stats.num_reads / num_reads_to_log) +
                     "M reads");
         next_read += num_reads_to_log;
       }
     }
   }
+
+  // if I could not get tile information from read names, I need to tell this to
+  // config so it does not output tile data later:
+  if (in.tile_ignore)
+    config.limits["tile"]["ignore"] = 1.0;
 }
 
 int main(int argc, const char **argv) {
   auto start = system_clock::now();
-
   /****************** COMMAND LINE OPTIONS ********************/
   const size_t MAX_KMER_SIZE = 10;
   bool help = false;
@@ -2873,7 +2900,6 @@ int main(int argc, const char **argv) {
 
   opt_parse.add_opt("-help", 'h', "print this help file adn exit", 
                      false, help);
-  
   opt_parse.add_opt("-version", 'v', "print the version of the program and exit", 
                      false, version);
 
@@ -2965,53 +2991,52 @@ int main(int argc, const char **argv) {
   }
 
   config.filename = leftover_args.front();
+
   /****************** BEGIN PROCESSING CONFIG ******************/
   config.setup();  // define file type, read limits, adapters, contaminants, etc
 
-
   /****************** END PROCESSING CONFIG *******************/
   if (!config.quiet)
-    LogProcess("Started reading file " +config.filename);
+    log_process("Started reading file " +config.filename);
 
   // Allocates vectors to summarize data
   FastqStats stats(config);
 
   // Initializes a reader given the file format
   if (config.format == "sam") {
-    LogProcess("reading file as sam format");
+    log_process("reading file as sam format");
     SamReader in(config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config.quiet);
+    read_stream_into_stats(in,stats,config);
   }
   else if (config.format == "bam") {
-    LogProcess("reading file as bam format");
+    log_process("reading file as bam format");
     BamReader in (config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config.quiet);
+    read_stream_into_stats(in,stats,config);
   }
 
   else if (config.compressed) {
-    LogProcess("reading file as gzipped fastq format");
+    log_process("reading file as gzipped fastq format");
     GzFastqReader in (config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config.quiet);
+    read_stream_into_stats(in,stats,config);
   }
   else {
-    LogProcess("reading file as uncompressed fastq format");
+    log_process("reading file as uncompressed fastq format");
     FastqReader in (config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config.quiet);
+    read_stream_into_stats(in,stats,config);
   }
 
   if (!config.quiet)
-    LogProcess("Finished reading file");
+    log_process("Finished reading file");
 
   if (!config.quiet)
-    LogProcess("Summarizing data");
+    log_process("Summarizing data");
 
   // This function has to be called before writing to output. This is where we
   // calculate all the summary statistics that will be written to output. 
   stats.summarize(config);
-
   /************************ WRITE TO OUTPUT *****************************/
   if (!config.quiet)
-    LogProcess("Writing data");
+    log_process("Writing data");
 
   // define output
   ofstream of;
@@ -3022,10 +3047,9 @@ int main(int argc, const char **argv) {
 
   // Write
   stats.write(os, config);
-
   /************************ WRITE TO HTML *****************************/
   if (!config.quiet)
-    LogProcess("Making html.");
+    log_process("Making html.");
   HTMLFactory factory ("Configuration/template.html");
   factory.put_file_details(config);
   factory.put_pass_warn_fail (stats, config);
@@ -3043,7 +3067,6 @@ int main(int argc, const char **argv) {
   ofstream html (config.outfile + ".html");
   html << factory.sourcecode;
   html.close();
-
   /************** TIME SUMMARY *********************************/
   if (!config.quiet) 
     cerr << "Elapsed time: " << 
