@@ -29,7 +29,6 @@
 
 #include <vector>
 #include <array>
-#include <ctime>
 #include <string>
 #include <cstring>
 #include <algorithm>
@@ -39,6 +38,9 @@
 #include <zlib.h>
 
 #include <htslib/sam.h>
+
+#include <chrono>
+#include <ctime>
 
 #include "smithlab_utils.hpp"
 #include "smithlab_os.hpp"
@@ -63,12 +65,26 @@ using std::ifstream;
 using std::sort;
 using std::max;
 using std::min;
+using std::stringstream;
 using std::istringstream;
 using std::ostringstream;
+using std::put_time;
+using std::to_string;
+
+using std::chrono::system_clock;
+using std::ctime;
 
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
  *************************************************************/
+
+static inline void
+LogProcess (const string &s) {
+  auto tmp = system_clock::to_time_t(system_clock::now());
+  string time_fmt = string(ctime(&tmp));
+  time_fmt.pop_back();
+  cerr << "[" << time_fmt << "] " << s << "\n";
+}
 
 // converts 64 bit integer to a sequence string by reading 2 bits at a time and
 // converting back to ACTG
@@ -316,9 +332,9 @@ void
 Config::setup() {
   define_file_format();
   read_limits();
-  if (limits["adapter"]["ignore"] != 0.0)
+  if (limits["adapter"]["ignore"] == 0.0)
     read_adapters();
-  if (limits["adapter"]["ignore"] != 0.0)
+  if (limits["adapter"]["ignore"] == 0.0)
     read_contaminants();
 }
 
@@ -2052,10 +2068,17 @@ SamReader::operator >> (FastqStats &stats) {
   }
   read_sequence_line(stats);
   read_quality_line(stats);
-  postprocess_fastq_record(stats);
+
+  // skips all tags after quality until newline
+  while (*curr != '\n') {
+    read_fast_forward_line(); 
+    skip_separator();
+  }
+
   // skip \n
   ++curr;
 
+  postprocess_fastq_record(stats);
   stats.num_reads++;
 
   // Returns if file should keep being checked
@@ -2190,7 +2213,6 @@ BamReader::operator >> (FastqStats &stats) {
       read_quality_line(stats);
       postprocess_fastq_record(stats);
 
-      cerr << buffer << "\n";
       stats.num_reads++;
       return true;
     } else {
@@ -2229,6 +2251,13 @@ struct HTMLFactory {
   explicit HTMLFactory (string filepath);
   void replace_placeholder_with_data (const string &placeholder, 
                                       const string &data);
+
+  void put_file_details (const Config &config);
+
+  // Functions to replace pass warn fail
+  void put_pass_warn_fail (const FastqStats &stats,
+                           Config &config);
+
   // Function to replace template placeholders with data
   void make_basic_statistics(const FastqStats &stats,
                              Config &config);
@@ -2269,13 +2298,58 @@ HTMLFactory::HTMLFactory (string filepath) {
 }
 
 void
+HTMLFactory::put_file_details (const Config &config) {
+  // Put filename in filename placeholder
+  replace_placeholder_with_data("{{filename}}", 
+                                strip_path(config.filename));
+
+  // Put date on date placeholder
+  auto tmp = system_clock::to_time_t(system_clock::now());
+  string time_fmt = string(ctime(&tmp));
+  replace_placeholder_with_data("{{date}}", time_fmt);
+}
+
+void
+HTMLFactory::put_pass_warn_fail (const FastqStats &stats,
+                                 Config &config) {
+  replace_placeholder_with_data ("{{passbasic}}", 
+                                 stats.pass_basic_statistics);
+  replace_placeholder_with_data ("{{passbasesequence}}", 
+                                 stats.pass_per_base_sequence_quality);
+  replace_placeholder_with_data ("{{passpertile}}", 
+                                 stats.pass_per_tile_sequence_quality);
+  replace_placeholder_with_data ("{{passpersequencequal}}", 
+                                 stats.pass_per_sequence_quality_scores);
+  replace_placeholder_with_data ("{{passperbasecontent}}", 
+                                 stats.pass_per_base_sequence_content);
+  replace_placeholder_with_data ("{{passpersequencegc}}", 
+                                 stats.pass_per_sequence_gc_content);
+  replace_placeholder_with_data ("{{passperbasencontent}}", 
+                                 stats.pass_per_base_n_content);
+  replace_placeholder_with_data ("{{passseqlength}}", 
+                                 stats.pass_sequence_length_distribution);
+  replace_placeholder_with_data ("{{passseqdup}}", 
+                                 stats.pass_duplicate_sequences);
+  replace_placeholder_with_data ("{{passoverrep}}", 
+                                 stats.pass_overrepresented_sequences);
+  replace_placeholder_with_data ("{{passadapter}}", 
+                                 stats.pass_adapter_content);
+}
+
+void
 HTMLFactory::replace_placeholder_with_data (const string &placeholder, 
                                             const string &data) {
   auto pos = sourcecode.find(placeholder);
+
+  // Placeholder not found
   if (pos == string::npos)
     throw runtime_error ("placeholder not found: " + placeholder);
 
-  sourcecode.replace(pos, placeholder.size(), data);
+  // at least one placeholder found
+  while (pos != string::npos) {
+    sourcecode.replace(pos, placeholder.size(), data);
+    pos = sourcecode.find(placeholder, pos + 1);
+  }
 }
 
 void 
@@ -2419,7 +2493,8 @@ HTMLFactory::make_sequence_quality_data (const FastqStats &stats) {
    if (i < 40)
      data << ", ";
   }
-  data << "], type: 'line', line : {color : 'red'}}";
+  data << "], type: 'line', line : {color : 'red'}, "
+       << "name : 'Sequence quality distribution'}";
 
   replace_placeholder_with_data (placeholder, data.str());
 }
@@ -2428,7 +2503,6 @@ void
 HTMLFactory::make_base_sequence_content_data (const FastqStats &stats) {
   ostringstream data;
   const string placeholder = "{{BASESEQCONTENTDATA}}";
-
   // ATGC
   for (size_t base = 0; base < stats.kNumNucleotides; ++base){
     // start line
@@ -2464,8 +2538,7 @@ HTMLFactory::make_base_sequence_content_data (const FastqStats &stats) {
       if (i < stats.max_read_length - 1)
         data << ", ";
     }
-
-    data << "], mode : 'lines', ";
+    data << "], mode : 'lines', name : '" + size_t_to_seq (base, 1) + "', ";
 
     // color
     data << "line :{ color : '";
@@ -2508,7 +2581,7 @@ HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats) {
    if (i < 101)
      data << ", ";
   }
-  data << "], type: 'line', line : {color : 'red'}}";
+  data << "], type: 'line', line : {color : 'red'}, name : 'GC distribution'}";
 
   // Theoretical count
   data << ", {x : [";
@@ -2525,7 +2598,8 @@ HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats) {
    if (i < 101)
      data << ", ";
   }
-  data << "], type: 'line', line : {color : 'blue'}}";
+  data << "], type: 'line', line : {color : 'blue'},"
+       << "name : 'Theoretical distribution'}";
 
   replace_placeholder_with_data (placeholder, data.str());
 }
@@ -2554,7 +2628,8 @@ HTMLFactory::make_base_n_content_data (const FastqStats &stats) {
     if (i < stats.max_read_length - 1)
       data << ", ";
   }
-  data << "], type: 'line', line : {color : 'red'}}";
+  data << "], type: 'line', line : {color : 'red'}, "
+       << "name : 'Fraction of N reads per base'}";
   replace_placeholder_with_data (placeholder, data.str());
 }
 
@@ -2566,17 +2641,23 @@ HTMLFactory::make_sequence_length_data (const FastqStats &stats) {
   // X values : avg quality phred scores
   data << "{x : [";
   bool first_seen = false;
+  size_t val;
   for (size_t i = 0; i < stats.max_read_length; ++i) {
-    if(!first_seen)
-      first_seen = true;
-    else 
-      data << ",";
+    val = 0 ;
     if (i < stats.kNumBases){
       if (stats.read_length_freq[i] > 0)
-        data << i + 1;
+        val = stats.read_length_freq[i];
     } else {
       if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
-        data << i + 1;
+        val = stats.read_length_freq[i];
+    }
+
+    if (val > 0) {
+      data << i+1;
+      if(first_seen)
+        data << ",";
+      else
+        first_seen = true;
     }
   }
 
@@ -2584,21 +2665,25 @@ HTMLFactory::make_sequence_length_data (const FastqStats &stats) {
   data << "], y : [";
   first_seen = false;
   for (size_t i = 0; i < stats.max_read_length; ++i) {
-    if(!first_seen)
-      first_seen = true;
-    else 
-      data << ",";
-
-    if (i < stats.kNumBases) {
+    val = 0 ;
+    if (i < stats.kNumBases){
       if (stats.read_length_freq[i] > 0)
-        data << stats.read_length_freq[i];
-    }
-    else {
+        val = stats.read_length_freq[i];
+    } else {
       if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
-        data << stats.long_read_length_freq[i - stats.kNumBases];
+        val = stats.read_length_freq[i];
+    }
+
+    if (val > 0) {
+      data << val;
+      if(first_seen)
+        data << ",";
+      else
+        first_seen = true;
     }
   }
-  data << "], type: 'line', line : {color : 'red'}}";
+  data << "], type: 'bar', marker : {color : 'red'}, "
+       << "name : 'Sequence length distribution'}";
 
   replace_placeholder_with_data (placeholder, data.str());
 }
@@ -2625,7 +2710,8 @@ HTMLFactory::make_sequence_duplication_data (const FastqStats &stats) {
     if (i < 15)
       data << ", ";
   }
-  data << "], type: 'line', line : {color : 'blue'}}";
+  data << "], type: 'line', line : {color : 'blue'}, "
+       << "name : 'total sequences'}";
 
   // deduplicated
   data << ", {x : [";
@@ -2643,7 +2729,8 @@ HTMLFactory::make_sequence_duplication_data (const FastqStats &stats) {
     if (i < 15)
       data << ", ";
   }
-  data << "], type: 'line', line : {color : 'red'}}";
+  data << "], type: 'line', line : {color : 'red'}, "
+       << "name : 'Deduplicated sequences'}";
   replace_placeholder_with_data (placeholder, data.str());
 }
 
@@ -2717,7 +2804,8 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
     }
 
     data << "]";
-    data << ", type : 'line'}";
+    data << ", type : 'line', ";
+    data << "name : '" << v.first << "'}";
     ++jj;
   }
   replace_placeholder_with_data (placeholder, data.str());
@@ -2727,16 +2815,36 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
  ********************* MAIN ***************************
  ******************************************************/
 
+// Read any file type until the end and logs progress
+template <typename T> void
+read_stream_into_stats(T &in, FastqStats &stats, bool quiet) {
+  in.load();
+  // Read record by record
+  const size_t num_reads_to_log = 1000000;
+  size_t next_read = num_reads_to_log;
+
+  while (in >> stats) {
+    if (!quiet) {
+      // Equality is faster than modular arithmetics
+      if (stats.num_reads == next_read) {
+        LogProcess ("Processed " +
+                    to_string(stats.num_reads / num_reads_to_log) +
+                    "M reads");
+        next_read += num_reads_to_log;
+      }
+    }
+  }
+}
 
 int main(int argc, const char **argv) {
-  clock_t begin = clock();  // register ellapsed time
+  auto start = system_clock::now();
+
   /****************** COMMAND LINE OPTIONS ********************/
   const size_t MAX_KMER_SIZE = 10;
   bool help = false;
   bool version = false;
   Config config;
 
-  cerr << "Parsing options\n";
   OptionParser opt_parse(strip_path(argv[0]),
                          "A high throughput sequence QC analysis tool",
                          "seqfile1 seqfile2 ... seqfileN");
@@ -2836,61 +2944,44 @@ int main(int argc, const char **argv) {
 
   config.filename = leftover_args.front();
   /****************** BEGIN PROCESSING CONFIG ******************/
-  cerr << "Reading config files\n";
   config.setup();  // define file type, read limits, adapters, contaminants, etc
 
 
   /****************** END PROCESSING CONFIG *******************/
   if (!config.quiet)
-    cerr << "Started reading file " << config.filename << ".\n";
+    LogProcess("Started reading file " +config.filename);
 
   // Allocates vectors to summarize data
   FastqStats stats(config);
 
   // Initializes a reader given the file format
-  StreamReader *in;
   if (config.format == "sam") {
-    cerr << "reading file as sam format\n";
-    in = new SamReader (config, stats.kNumBases);
+    LogProcess("reading file as sam format");
+    SamReader in(config, stats.kNumBases);
+    read_stream_into_stats(in,stats,config.quiet);
   }
   else if (config.format == "bam") {
-    cerr << "reading file as bam format\n";
-    in = new BamReader (config, stats.kNumBases);
+    LogProcess("reading file as bam format");
+    BamReader in (config, stats.kNumBases);
+    read_stream_into_stats(in,stats,config.quiet);
   }
 
   else if (config.compressed) {
-    cerr << "reading file as gzipped fastq format\n";
-    in = new GzFastqReader (config, stats.kNumBases);
+    LogProcess("reading file as gzipped fastq format");
+    GzFastqReader in (config, stats.kNumBases);
+    read_stream_into_stats(in,stats,config.quiet);
   }
   else {
-    cerr << "reading file as uncompressed fastq format\n";
-    in = new FastqReader (config, stats.kNumBases);
-  }
-  in->load();
-
-  // Read record by record
-  const size_t num_reads_to_log = 1000000;
-  size_t next_read = num_reads_to_log;
-
-  while ((*in) >> stats) {
-    if (!config.quiet) {
-      // Equality is faster than modular arithmetics
-      if (stats.num_reads == next_read) {
-        cerr << "Processed " << stats.num_reads / num_reads_to_log
-             << "M reads.\n";
-        next_read += num_reads_to_log;
-      }
-    }
+    LogProcess("reading file as uncompressed fastq format");
+    FastqReader in (config, stats.kNumBases);
+    read_stream_into_stats(in,stats,config.quiet);
   }
 
-  // Free memory
-  delete in;
+  if (!config.quiet)
+    LogProcess("Finished reading file");
 
   if (!config.quiet)
-    cerr << "Finished reading file.\n";
-
-  if (!config.quiet)
-    cerr << "Summarizing data.\n";
+    LogProcess("Summarizing data");
 
   // This function has to be called before writing to output. This is where we
   // calculate all the summary statistics that will be written to output. 
@@ -2898,7 +2989,7 @@ int main(int argc, const char **argv) {
 
   /************************ WRITE TO OUTPUT *****************************/
   if (!config.quiet)
-    cerr << "Writing data.\n";
+    LogProcess("Writing data");
 
   // define output
   ofstream of;
@@ -2912,8 +3003,10 @@ int main(int argc, const char **argv) {
 
   /************************ WRITE TO HTML *****************************/
   if (!config.quiet)
-    cerr << "Making html.\n";
+    LogProcess("Making html.");
   HTMLFactory factory ("Configuration/template.html");
+  factory.put_file_details(config);
+  factory.put_pass_warn_fail (stats, config);
   factory.make_basic_statistics (stats, config);
   factory.make_position_quality_data (stats);
   factory.make_tile_quality_data (stats);
@@ -2930,9 +3023,11 @@ int main(int argc, const char **argv) {
   html.close();
 
   /************** TIME SUMMARY *********************************/
-  if (!config.quiet)
-    cerr << "Elapsed time: "
-         << (clock() - begin) / CLOCKS_PER_SEC
-         << " seconds\n";
+  if (!config.quiet) 
+    cerr << "Elapsed time: " << 
+    std::chrono::duration_cast<std::chrono::seconds>(
+        system_clock::now() - start
+    ).count() 
+    << "s\n";
 }
 

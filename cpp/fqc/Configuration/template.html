@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
 
 	<title>
-		SRR10124060_rnaseq.fastq FastQC Report
+    Report for {{filename}}
 	</title>
 <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
-
+<link href="https://stackpath.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css" rel="stylesheet" integrity="sha384-wvfXpqpZZVQGK6TAh5PVlGOfQNHSoD2xbE+QkPxCAFlNEevoEH3Sl0sibVcOQVnN" crossorigin="anonymous">
 <style type="text/css">
  @media screen {
   div.summary {
@@ -151,163 +151,235 @@
   clear:left;
   }
 
-  table { 
+table {
   margin-left: 3em;
   text-align: center;
   }
   
-  th { 
+th {
   text-align: center;
   background-color: #000080;
   color: #FFF;
   padding: 0.4em;
-  }      
+}
   
-  td { 
-  font-family: monospace; 
+td {
+  font-family: monospace;
   text-align: left;
   background-color: #EEE;
   color: #000;
   padding: 0.4em;
-  }
+}
 
-  img {
+img {
   padding-top: 0;
   margin-top: 0;
   border-top: 0;
-  }
+}
 
   
-  p {
+p {
   padding-top: 0;
   margin-top: 0;
-  }
+}
+
+.pass {
+  color : #009900;
+}
+
+.warn {
+  color : #999900;
+}
+
+.fail {
+  color : #990000;
+}
 </style>
 <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 </head>
 <body>
 <div class="header">
-	<div id="header_title">FastQC Report</div>
-		<div id="header_filename">Wed 18 Sep 2019<br/> SRR10124060_rnaseq.fastq
+	<div id="header_title">Report</div>
+  <div id="header_filename">{{date}}<br/> {{filename}}
 	</div>
 </div>
 <div class="summary"><h2>Summary</h2>
 <ul>
-	<li><a href="#basicstatistics">Basic Statistics</a></li>
-	<li><a href="#perbasesequencequality">Per base sequence quality</a></li>
-	<li><a href="#pertilesequencequality">Per tile sequence quality</a></li>
-	<li><a href="#persequencequalityscores">Per sequence quality scores</a></li>
-	<li><a href="#perbasesequencecontent">Per base sequence content</a></li>
-	<li><a href="#persequencegccontent">Per sequence GC content</a></li>
-	<li><a href="#perbasencontent">Per base N content</a></li>
-	<li><a href="#sequencelengthdistribution">Sequence Length Distribution</a></li>
-	<li><a href="#sequenceduplicationlevels">Sequence Duplication Levels</a></li>
-	<li><a href="#overrepresentedsequences">Overrepresented sequences</a></li>
-	<li><a href="#adaptercontent">Adapter Content</a></li>
-	<li><a href="#kmercontent">Kmer Content</a></li>
+  <li><a class="{{passbasic}}" href="#basicstatistics">Basic Statistics</a></li>
+	<li><a class="{{passbasesequence}}" href="#perbasesequencequality">Per base sequence quality</a></li>
+	<li><a class="{{passpertile}}" href="#pertilesequencequality">Per tile sequence quality</a></li>
+	<li><a class="{{passpersequencequal}}" href="#persequencequalityscores">Per sequence quality scores</a></li>
+	<li><a class="{{passperbasecontent}}" href="#perbasesequencecontent">Per base sequence content</a></li>
+	<li><a class="{{passpersequencegc}}" href="#persequencegccontent">Per sequence GC content</a></li>
+	<li><a class="{{passperbasencontent}}" href="#perbasencontent">Per base N content</a></li>
+	<li><a class="{{passseqlength}}" href="#sequencelengthdistribution">Sequence Length Distribution</a></li>
+	<li><a class="{{passseqdup}}" href="#sequenceduplicationlevels">Sequence Duplication Levels</a></li>
+	<li><a class="{{passoverrep}}" href="#overrepresentedsequences">Overrepresented sequences</a></li>
+	<li><a class="{{passadapter}}" href="#adaptercontent">Adapter Content</a></li>
+	<li><a class="{{passkmer}}" href="#kmercontent">Kmer Content</a></li>
 </ul>
 </div>
 <div class="main">
 <div class="module">
-	<h2 id="basicstatistics">Basic Statistics</h2>
+  <h2 class="{{passbasic}}" id="basicstatistics">
+    Basic Statistics: {{passbasic}}
+  </h2>
   {{BASICSTATSDATA}}
 </div>
 <div class="module">
-	<h2 id="perbasesequencequality">Per base sequence quality</h2>
+	<h2 class="{{passbasesequence}}" id="perbasesequencequality">
+    Per base sequence quality: {{passbasesequence}}</h2>
  	<div id="seqbasequalityboxplot"></div>
 </div>
 <div class="module">
-	<h2 id="pertilesequencequality">Per tile sequence quality</h2>
+	<h2 class="{{passpertile}}" id="pertilesequencequality">
+    Per tile sequence quality : {{passpertile}}
+  </h2>
  	<div id="tilequalityheatmap"></div>
 </div>
 <div class="module">
-	<h2 id="persequencequalityscores">Per sequence quality scores</h2>
+	<h2 class="{{passpersequencequal}}" id="persequencequalityscores">
+    Per sequence quality scores : {{passpersequencequal}}
+  </h2>
  	<div id="seqqualitylineplot"></div>
 </div>
 <div class="module">
-	<h2 id="perbasesequencecontent">Per base sequence content</h2>
+	<h2 class="{{passperbasecontent}}" id="perbasesequencecontent">
+    Per base sequence content : {{passperbasecontent}}
+  </h2>
  	<div id="basesequencecontentlineplot"></div>
 </div>
 <div class="module">
-	<h2 id="persequencegccontent">Per sequence gc content</h2>
+	<h2 class="{{passpersequencegc}}" id="persequencegccontent">
+    Per sequence gc content : {{passpersequencegc}}
+  </h2>
  	<div id="sequencegccontentlineplot"></div>
 </div>
 <div class="module">
-	<h2 id="perbasencontent">Per base N content</h2>
+	<h2 class="{{passperbasencontent}}" id="perbasencontent">
+    Per base N content : {{passperbasencontent}}
+  </h2>
  	<div id="basencontentlineplot"></div>
 </div>
 <div class="module">
-	<h2 id="sequencelengthdistribution">Sequence length distribution</h2>
+	<h2 class="{{passseqlength}}" id="sequencelengthdistribution">
+    Sequence length distribution : {{passseqlength}}
+  </h2>
  	<div id="sequencelengthdistributionlineplot"></div>
 </div>
 <div class="module">
-	<h2 id="sequenceduplicationlevels">Sequence duplication levels</h2>
+	<h2 class="{{passseqdup}}" id="sequenceduplicationlevels">
+    Sequence duplication levels : {{passseqdup}}
+  </h2>
  	<div id="seqduplevelslineplot"></div>
 </div>
 <div class="module">
-	<h2 id="overrepresentedsequences">Overrepresented Sequences</h2>
+	<h2 class="{{passoverrep}}" id="overrepresentedsequences">
+    Overrepresented Sequences : {{passoverrep}}</h2>
   {{OVERREPSEQDATA}}
 </div>
 <div class="module">
-  <h2 id="adaptercontent">Adapter content</h2>
+  <h2 class="{{passadapter}}" id="adaptercontent">
+    Adapter content : {{passadapter}}
+  </h2>
  	<div id="adapterlineplot"></div>
 </div>
 </div>
 <div class="footer">Produced by FastQC (version 0.11.8)
 </div>
 </body>
-<script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" crossorigin="anonymous"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="sha384-UO2eT0CpHqdSJQ6hJty5KVphtPhzWj9WO1clHTMGa3JDZwrnQq4sF86dIHNDz0W1" crossorigin="anonymous"></script>
-<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
+<script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" 
+integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" 
+crossorigin="anonymous"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" 
+integrity="sha384-UO2eT0CpHqdSJQ6hJty5KVphtPhzWj9WO1clHTMGa3JDZwrnQq4sF86dIHNDz0W1"
+crossorigin="anonymous"></script>
+
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"
+integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM"
+crossorigin="anonymous"></script>
 
 <script>
-Plotly.newPlot('seqbasequalityboxplot', [
- {{SEQBASEQUALITYDATA}}
-], {
-margin: { t: 0 }, showlegend: false } );
+  Plotly.newPlot('seqbasequalityboxplot', [
+   {{SEQBASEQUALITYDATA}}
+  ], {
+    margin: { t: 0 }, showlegend: false,
+    xaxis : {title : 'Base position'},
+    yaxis : {title : 'Phread quality'},
+  });
 
-Plotly.newPlot('tilequalityheatmap', [
- {{TILEQUALITYDATA}}
-], {
-margin: { t: 0 }, showlegend: false } );
-
-
-Plotly.newPlot('seqqualitylineplot', [
- {{SEQQUALITYDATA}}
-], {
-margin: { t: 0 }, showlegend: true} );
-
-Plotly.newPlot('basesequencecontentlineplot', [
- {{BASESEQCONTENTDATA}}
-], {
-margin: { t: 0 }, showlegend: true} );
-
-Plotly.newPlot('sequencegccontentlineplot', [
- {{SEQGCCONTENTDATA}}
-], {
-margin: { t: 0 }, showlegend: true} );
-
-Plotly.newPlot('basencontentlineplot', [
- {{BASENCONTENTDATA}}
-], {
-margin: { t: 0 }, showlegend: true} );
-
-Plotly.newPlot('sequencelengthdistributionlineplot', [
- {{SEQLENDATA}}
-], {
-margin: { t: 0 }, showlegend: true} );
-
-Plotly.newPlot('seqduplevelslineplot', [
- {{SEQDUPDATA}}
-], {
-margin: { t: 0 }, showlegend: true} );
-
-Plotly.newPlot('adapterlineplot', [
- {{ADAPTERDATA}}
-], {
-margin: { t: 0 }, showlegend: true} );
+  Plotly.newPlot('tilequalityheatmap', [
+   {{TILEQUALITYDATA}}
+  ], {
+    margin: { t: 0 }, 
+    showlegend: false,
+    xaxis : {title : 'Base position'},
+    yaxis : {title : 'tile'} 
+  });
 
 
+  Plotly.newPlot('seqqualitylineplot', [
+   {{SEQQUALITYDATA}}
+  ], {
+    margin: { t: 0 },
+    showlegend: true,
+    xaxis : {title : 'Phread quality'},
+    yaxis : {title : 'Density'}
+  } );
 
+  Plotly.newPlot('basesequencecontentlineplot', [
+   {{BASESEQCONTENTDATA}}
+  ], {
+    margin: { t: 0 },
+    showlegend: true,
+    xaxis : {title : 'Base position'},
+    yaxis : {title : '% sequence content'}
+  } );
+
+  Plotly.newPlot('sequencegccontentlineplot', [
+   {{SEQGCCONTENTDATA}}
+  ], {
+    margin: { t: 0 }, 
+    showlegend: true,
+    xaxis : {title : '% GC'},
+    yaxis : {title : 'Density'}
+  } );
+
+  Plotly.newPlot('basencontentlineplot', [
+   {{BASENCONTENTDATA}}
+  ], {
+    margin: { t: 0 }, 
+    showlegend: true,
+    xaxis : {title : 'Base position'},
+    yaxis : {title : '% N'}
+  } );
+
+  Plotly.newPlot('sequencelengthdistributionlineplot', [
+   {{SEQLENDATA}}
+  ], {
+    margin: { t: 0 }, 
+    showlegend: true,
+    xaxis : {title : 'Sequence length'},
+    yaxis : {title : 'Number of sequences'}
+  } );
+
+  Plotly.newPlot('seqduplevelslineplot', [
+   {{SEQDUPDATA}}
+  ], {
+    margin: { t: 0 }, 
+    showlegend: true,
+    xaxis : {title : 'Duplication rate'},
+    yaxis : {title : '% of sequences'}
+  } );
+
+  Plotly.newPlot('adapterlineplot', [
+   {{ADAPTERDATA}}
+  ], {
+    margin: { t: 0 }, 
+    showlegend: true,
+    xaxis : {title : 'Base position'},
+    yaxis : {title : 'Number of sequences with adapter before position'}
+  } );
 </script>
 </html>
