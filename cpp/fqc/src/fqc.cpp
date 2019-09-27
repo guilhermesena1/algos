@@ -112,7 +112,7 @@ actg_to_2bit(const char &c) {
 }
 
 // log of a power of two, to use in bit shifting for fast index acces
-size_t
+constexpr size_t
 log2exact(size_t powerOfTwo) {
   if (powerOfTwo & (powerOfTwo - 1))
     throw std::runtime_error("not a power of two!");
@@ -222,7 +222,7 @@ sum_deviation_from_normal (const array <size_t, 101> &gc_content,
 }
 
 /*************************************************************
- ******************** AUX FUNCTIONS **************************
+ ******************** CUSTOM CONFIGURATION *******************
  *************************************************************/
 
 // config from options, constants, magic numbers, etc
@@ -248,14 +248,14 @@ struct Config {
   bool extract;  // if set the zipped file will be uncompressed
   bool nogroup;  // disable grouping of bases for reads >50bp
   bool compressed;  // whether or not to inflate file
+  bool quiet;
   size_t min_length;  // lower limit in sequence length to be shown in report
-  string format;  // force file format
   size_t threads;  // number of threads to read multiple files in parallel
+  size_t kmer_size;  // kmer size
+  string format;  // force file format
   string contaminants_file;  // custom contaminants file
   string adapters_file;  // adapters file
   string limits_file;  // file with limits and options and custom analyses
-  size_t kmer_size;  // kmer size
-  bool quiet;
   string tmpdir;  // dir for temp files when generating report images
 
   // config on how to handle reads
@@ -284,7 +284,7 @@ struct Config {
 
   // IO
   string filename;
-  string outfile;
+
   /*********** FUNCTIONS TO READ FILES *************/
   Config();  // set magic defaults
   void define_file_format();
@@ -575,13 +575,18 @@ struct FastqStats {
   // Prefix size to cut if read length exceeds the value above
   static const size_t kDupReadTruncateSize = 50;
  
+  // Kmer size given as input
+  static const size_t kmer_size = 7;
+
+  // Bit shifts as instructions for the arrays
+  static const size_t kBitShiftNucleotide = log2exact(kNumNucleotides);
+  static const size_t kBitShiftTile = log2exact(kNumMaxTiles);
+  static const size_t kBitShiftQuality = log2exact(kNumQualityValues);
+  static const size_t kBitShiftKmer = 2 * kmer_size; // two bits per base
+
  public:
   /*********** SINGLE NUMBERS FROM THE ENTIRE FASTQ ****************/
-  size_t kBitShiftNucleotide;  // log 2 of value above
-  size_t kBitShiftTile;
-  size_t kBitShiftQuality;  // log 2 of value above
-
-  // Number of unique sequences seen thus far
+    // Number of unique sequences seen thus far
   size_t num_unique_seen;
 
   // How many reads were processed before num_unique_seen = kDupUniqueCutoff
@@ -596,10 +601,6 @@ struct FastqStats {
   size_t max_read_length;  // total number of lines read
   size_t num_poor;  // reads whose average quality was <= poor
   size_t num_extra_bases;  // number of bases outside of buffer
-
-  // Kmer size given as input
-  size_t kmer_size;
-  size_t kBitShiftKmer;
 
   // mask to get only the first 2*k bits of the sliding window
   size_t kmer_mask;
@@ -710,7 +711,7 @@ struct FastqStats {
     /**************** FUNCTIONS ****************************/
 
   // Default constructor that zeros everything
-  explicit FastqStats(const Config &config);
+  explicit FastqStats();
 
   // Allocation of more read positions
   inline void allocate_new_base(const bool ignore_tile);
@@ -727,7 +728,7 @@ struct FastqStats {
 };
 
 // Default constructor
-FastqStats::FastqStats(const Config &config) {
+FastqStats::FastqStats() {
   total_bases = 0;
   num_extra_bases = 0;
   avg_read_length = 0;
@@ -752,16 +753,10 @@ FastqStats::FastqStats(const Config &config) {
   tile_position_quality.fill(0);
   tile_count.fill(0);
 
-  // Defines bit shift values
-  kBitShiftNucleotide = log2exact(kNumNucleotides);
-  kBitShiftQuality = log2exact(kNumQualityValues);
-  kBitShiftTile = log2exact(kNumMaxTiles);
   // Defines k-mer mask, length and allocates vector
-  kmer_size = config.kmer_size;
   kmer_mask = (1ll << (2*kmer_size)) - 1;
-  kmer_count = vector<size_t>(min(kNumBases, kKmerMaxBases) 
+  kmer_count = vector<size_t>(min(kNumBases, kKmerMaxBases)
                                   * (kmer_mask + 1), 0);
-  kBitShiftKmer = 2*kmer_size;
 }
 
 // When we read new bases, dynamically allocate new space for their statistics
@@ -812,7 +807,7 @@ FastqStats::summarize(Config &config) {
       avg_gc += base_count[(i << kBitShiftNucleotide) | 1];  // C
       avg_gc += base_count[(i << kBitShiftNucleotide) | 3];  // G
     } else {
-      avg_gc += long_base_count[(i - kNumBases) << kBitShiftNucleotide | 1];  // C
+        avg_gc += long_base_count[(i - kNumBases) << kBitShiftNucleotide | 1];  // C
       avg_gc += long_base_count[(i - kNumBases) << kBitShiftNucleotide | 3];  // G
     }
   }
@@ -1266,7 +1261,9 @@ FastqStats::write(ostream &os, const Config &config) {
   os << "Filename\t" << strip_path (config.filename) << "\n";
   os << "Total Sequences\t" << num_reads << "\n";
   os << "Sequences flagged as poor quality \t" << num_poor << "\n";
-  os << "%GC \t" << avg_gc << "\n";
+
+  if (config.do_sequence)
+    os << "%GC \t" << avg_gc << "\n";
   os << ">>END_MODULE\n";
 
   // Per base quality
@@ -1492,7 +1489,8 @@ class StreamReader{
              do_quality_sequence,
              do_tile,
              do_adapter,
-             do_sequence_length;
+             do_sequence_length,
+             do_nogroup;
 
   // buffer size to store line 2 of each read statically
   const size_t buffer_size;
@@ -1515,18 +1513,28 @@ class StreamReader{
   // Whether or not to write bases to buffer when reading sequence
   bool write_to_buffer;
 
-  bool tile_ignore;  // Whether to just ignore per tile sequence quality
+  // Whether to just ignore per tile sequence quality if tiles are not in the
+  // name
+  bool tile_ignore; 
 
   // Get a base from the sequence line
   char base_from_buffer;
 
+  // the static buffer that takes the sequence data
   char *buffer;
-  char *cur_char; // pointer to current read character
+
+  // pointer to current read character. Each file type should figure out how to
+  // handle this as the file is processed
+  char *cur_char;
 
   // Number of bases that have overflown the buffer
   size_t leftover_ind;
+
   /********* TILE PARSING ********/
-  size_t tile_cur;  // tile value parsed from line 1 of each record
+  // tile value parsed from line 1 of each record
+  size_t tile_cur;
+
+  // the number of colons (:) needed to be seen until we know we are in a tile
   size_t tile_split_point;
 
   // Temp variables to be updated as you pass through the file
@@ -1550,6 +1558,8 @@ class StreamReader{
   inline void put_base_in_buffer();  // puts base in buffer or leftover
   inline void get_base_from_buffer();  // gets base from buffer or leftover
 
+  // on the first tile-processed read, we will try to figure out how tiles
+  // should be parsed
   inline void get_tile_split_position();
   inline void get_tile_value();
 
@@ -1597,6 +1607,7 @@ StreamReader::StreamReader(Config &config,
   do_tile(config.do_tile),
   do_adapter(config.do_adapter),
   do_sequence_length(config.do_sequence_length),
+  do_nogroup (config.nogroup), 
 
   // Here are the usual stream reader configs
   buffer_size (_buffer_size),
@@ -1919,7 +1930,7 @@ StreamReader::read_quality_line(FastqStats &stats){
   // For quality, we do not look for the separator, but rather for an explicit
   // newline or EOF in case the file does not end with newline or we are getting
   // decompressed strings from a stream
-  for (; (*cur_char != line_separator); ++cur_char) {
+  for (; (*cur_char != line_separator) && !is_eof(); ++cur_char) {
     get_base_from_buffer();
 
     // Converts quality ascii to zero-based
@@ -1966,7 +1977,7 @@ StreamReader::postprocess_fastq_record(FastqStats &stats) {
 
   if (do_overrepresented || do_duplication) {
     // if reads are >75pb, truncate to 50
-    if(read_pos <= stats.kDupReadMaxSize)
+    if(read_pos <= stats.kDupReadMaxSize || do_nogroup)
       buffer[read_pos] = '\0';
     else
       buffer[stats.kDupReadTruncateSize] = '\0';
@@ -2093,23 +2104,23 @@ class GzFastqReader : public FastqReader {
   static const size_t chunk_size = 16384;
   char gzbuf[chunk_size];
   gzFile fileobj;
- 
+
  public:
   GzFastqReader(Config &_config,
                 const size_t _buffer_size);
   void load();
-  inline bool is_eof(); 
+  inline bool is_eof();
   inline bool operator >> (FastqStats &stats);
   ~GzFastqReader();
 };
 
-// Set fastq separator as \n
+// the gz fastq constructor is the same as the fastq
 GzFastqReader::GzFastqReader (Config &_config,
                               const size_t _buffer_size) :
 FastqReader(_config, _buffer_size) {
 }
 
-// Load fastq
+// Load fastq with zlib
 void
 GzFastqReader::load() {
   fileobj = gzopen(filename.c_str(), "r");
@@ -2117,16 +2128,17 @@ GzFastqReader::load() {
   ++cur_char;
 }
 
+// straightforward
 inline bool
 GzFastqReader::is_eof() {
   return gzeof(fileobj);
 }
 
-
 GzFastqReader::~GzFastqReader() {
   gzclose_r (fileobj);
 }
-// Parses the particular fastq format
+
+// Parses fastq gz by reading line by line into the gzbuf
 inline bool
 GzFastqReader::operator >> (FastqStats &stats) {
   cur_char = gzgets (fileobj, gzbuf, chunk_size);
@@ -2170,7 +2182,7 @@ class SamReader : public StreamReader {
   void *mmap_data;
   char *last;
  public:
-  SamReader (Config &_config, 
+  SamReader (Config &_config,
              const size_t _buffer_size);
   void load();
   inline bool is_eof();
@@ -2180,7 +2192,7 @@ class SamReader : public StreamReader {
 
 // set sam separator as tab
 SamReader::SamReader (Config &_config,
-                      const size_t _buffer_size) : 
+                      const size_t _buffer_size) :
 StreamReader(_config, _buffer_size, '\t', '\n') {
 
 }
@@ -2313,6 +2325,7 @@ BamReader::operator >> (FastqStats &stats) {
 
       read_sequence_line(stats);
       read_quality_line(stats);
+
       postprocess_fastq_record(stats);
       stats.num_reads++;
       return true;
@@ -2322,7 +2335,8 @@ BamReader::operator >> (FastqStats &stats) {
 
     return false;
   }
-  // Returns if file should keep being checked
+
+  // If I could not read another line it means it's eof
   return false;
 }
 
@@ -2346,10 +2360,8 @@ BamReader::~BamReader() {
 /*******************************************************/
 /*************** HTML FACTORY **************************/
 /*******************************************************/
-struct HTMLFactory {
- public:
-  string sourcecode;
-  explicit HTMLFactory (string filepath);
+class HTMLFactory {
+ private:
   void replace_placeholder_with_data (const string &placeholder, 
                                       const string &data);
 
@@ -2361,8 +2373,7 @@ struct HTMLFactory {
   void comment_out (const Config &config);
 
   // Functions to replace pass warn fail
-  void put_pass_warn_fail (const FastqStats &stats,
-                           Config &config);
+  void put_pass_warn_fail (const FastqStats &stats);
 
   // Function to replace template placeholders with data
   void make_basic_statistics(const FastqStats &stats,
@@ -2396,6 +2407,11 @@ struct HTMLFactory {
 
   void make_adapter_content_data(FastqStats &stats,
                                  Config &config);
+
+ public:
+  string sourcecode;
+  explicit HTMLFactory (string filepath);
+  void write(FastqStats &stats, Config &config);
 };
 
 HTMLFactory::HTMLFactory (string filepath) {
@@ -2405,7 +2421,7 @@ HTMLFactory::HTMLFactory (string filepath) {
     throw runtime_error ("HTML layout not found: " + filepath);
   string line;
 
-  // pass the whole source code to a string
+  // pass the whole source code template to a string
   while (getline(in, line))
     sourcecode += line + "\n";
 }
@@ -2436,6 +2452,8 @@ HTMLFactory::comment_if_skipped (string ph_begin,
     replace_placeholder_with_data(ph_begin, "<!--");
     replace_placeholder_with_data(ph_end, "-->");
   }
+
+  // otherwise delete placeholder
   else {
     replace_placeholder_with_data(ph_begin, "");
     replace_placeholder_with_data(ph_end, "");
@@ -2497,27 +2515,26 @@ HTMLFactory::put_file_details (const Config &config) {
 }
 
 void
-HTMLFactory::put_pass_warn_fail (const FastqStats &stats,
-                                 Config &config) {
-  replace_placeholder_with_data ("{{passbasic}}", 
+HTMLFactory::put_pass_warn_fail (const FastqStats &stats) {
+  replace_placeholder_with_data ("{{passbasic}}",
                                  stats.pass_basic_statistics);
-  replace_placeholder_with_data ("{{passbasesequence}}", 
+  replace_placeholder_with_data ("{{passbasesequence}}",
                                  stats.pass_per_base_sequence_quality);
-  replace_placeholder_with_data ("{{passpertile}}", 
+  replace_placeholder_with_data ("{{passpertile}}",
                                  stats.pass_per_tile_sequence_quality);
-  replace_placeholder_with_data ("{{passpersequencequal}}", 
+  replace_placeholder_with_data ("{{passpersequencequal}}",
                                  stats.pass_per_sequence_quality_scores);
-  replace_placeholder_with_data ("{{passperbasecontent}}", 
+  replace_placeholder_with_data ("{{passperbasecontent}}",
                                  stats.pass_per_base_sequence_content);
-  replace_placeholder_with_data ("{{passpersequencegc}}", 
+  replace_placeholder_with_data ("{{passpersequencegc}}",
                                  stats.pass_per_sequence_gc_content);
-  replace_placeholder_with_data ("{{passperbasencontent}}", 
+  replace_placeholder_with_data ("{{passperbasencontent}}",
                                  stats.pass_per_base_n_content);
-  replace_placeholder_with_data ("{{passseqlength}}", 
+  replace_placeholder_with_data ("{{passseqlength}}",
                                  stats.pass_sequence_length_distribution);
-  replace_placeholder_with_data ("{{passseqdup}}", 
+  replace_placeholder_with_data ("{{passseqdup}}",
                                  stats.pass_duplicate_sequences);
-  replace_placeholder_with_data ("{{passoverrep}}", 
+  replace_placeholder_with_data ("{{passoverrep}}",
                                  stats.pass_overrepresented_sequences);
   replace_placeholder_with_data ("{{passadapter}}", 
                                  stats.pass_adapter_content);
@@ -2539,7 +2556,9 @@ HTMLFactory::make_basic_statistics(const FastqStats &stats,
   else
     data << stats.max_read_length;
   data << "</td></tr>";
-  data << "<tr><td>%GC:</td><td>" << stats.avg_gc << "</td></tr>";
+
+  if (config.do_sequence)
+    data << "<tr><td>%GC:</td><td>" << stats.avg_gc << "</td></tr>";
   data << "</tbody></table>";
 
   replace_placeholder_with_data (placeholder, data.str());
@@ -2609,7 +2628,7 @@ HTMLFactory::make_tile_quality_data (const FastqStats &stats,
       if(stats.tile_count[i] > 0) {
         if(!first_seen)
           first_seen = true;
-        else 
+        else
           data << ",";
         data << i;
       }
@@ -2622,7 +2641,7 @@ HTMLFactory::make_tile_quality_data (const FastqStats &stats,
       if(stats.tile_count[i] > 0) {
         if(!first_seen)
           first_seen = true;
-        else 
+        else
           data << ", ";
 
         // datart new array with all counts
@@ -2897,7 +2916,7 @@ HTMLFactory::make_sequence_length_data (const FastqStats &stats,
 }
 
 
-void 
+void
 HTMLFactory::make_sequence_duplication_data (const FastqStats &stats,
                                              const Config &config) {
   ostringstream data;
@@ -3016,23 +3035,49 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
   replace_placeholder_with_data (placeholder, data.str());
 }
 
+void
+HTMLFactory::write (FastqStats &stats, Config &config) {
+  // Filename and date
+  put_file_details(config);
+
+  // Put html comments around things to skip
+  comment_out(config);
+
+  // Put colors in pass, warn and fail
+  put_pass_warn_fail (stats);
+
+  // Put data on tables and plotly javascripts
+  make_basic_statistics (stats, config);
+  make_position_quality_data (stats, config);
+  make_tile_quality_data (stats, config);
+  make_sequence_quality_data (stats, config);
+  make_base_sequence_content_data (stats, config);
+  make_sequence_gc_content_data (stats, config);
+  make_base_n_content_data (stats, config);
+  make_sequence_length_data (stats, config);
+  make_sequence_duplication_data (stats, config);
+  make_overrepresented_sequences_data (stats, config);
+  make_adapter_content_data (stats, config);
+}
+
 /******************************************************
  ********************* MAIN ***************************
  ******************************************************/
 
 // Read any file type until the end and logs progress
 template <typename T> void
-read_stream_into_stats(T &in, 
-                       FastqStats &stats, 
+read_stream_into_stats(T &in,
+                       FastqStats &stats,
                        Config &config) {
   in.load();
-  // Read record by record
+
+  // Fast way to report # of reads without modulo arithmetics
   const size_t num_reads_to_log = 1000000;
   size_t next_read = num_reads_to_log;
 
+  // Read record by record
   while (in >> stats) {
     if (!config.quiet) {
-      // Equality is faster than modular arithmetics
       if (stats.num_reads == next_read) {
         log_process ("Processed " +
                     to_string(stats.num_reads / num_reads_to_log) +
@@ -3043,18 +3088,18 @@ read_stream_into_stats(T &in,
   }
 
   // if I could not get tile information from read names, I need to tell this to
-  // config so it does not output tile data later:
+  // config so it does not output tile data on the summary or html
   if (in.tile_ignore)
     config.do_tile = false;
 }
 
 int main(int argc, const char **argv) {
-  auto start = system_clock::now();
   /****************** COMMAND LINE OPTIONS ********************/
-  const size_t MAX_KMER_SIZE = 10;
   bool help = false;
   bool version = false;
   Config config;
+  string forced_file_format;
+  string outdir = "";
 
   OptionParser opt_parse(strip_path(argv[0]),
                          "A high throughput sequence QC analysis tool",
@@ -3062,12 +3107,14 @@ int main(int argc, const char **argv) {
 
   opt_parse.add_opt("-help", 'h', "print this help file adn exit", 
                      false, help);
+
   opt_parse.add_opt("-version", 'v', "print the version of the program and exit", 
                      false, version);
 
-  opt_parse.add_opt("-outfile", 'o',
-                    "filename to save results (default = stdout)",
-                    false, config.outfile);
+  opt_parse.add_opt("-outdir", 'o', "Create all output files in the specified "
+                    "output directory. If not provided, files will be created "
+                    "in the same directory as the input file.",
+                    false, outdir);
 
   opt_parse.add_opt("-casava", 'C',
                     "Files come from raw casava output (currently ignored)",
@@ -3078,11 +3125,13 @@ int main(int argc, const char **argv) {
                     false, config.nanopore);
 
   opt_parse.add_opt("-nofilter", 'F',
-                    "If running with --casava do not remove poor quality sequences",
+                    "If running with --casava do not remove poor quality "
+                    "sequences (currently ignored)",
                     false, config.nofilter);
 
   opt_parse.add_opt("-noextract", 'e',
-                    "If running with --casava do not remove poor quality sequences",
+                    "If running with --casava do not remove poor quality "
+                    " sequences (currently ignored)",
                     false, config.casava);
 
   opt_parse.add_opt("-nogroup", 'g',
@@ -3091,7 +3140,7 @@ int main(int argc, const char **argv) {
 
   opt_parse.add_opt("-format", 'f',
                     "Force file format",
-                    false, config.format);
+                    false, forced_file_format);
 
   opt_parse.add_opt("-threads", 't',
                     "Specifies number of simultaneous files ",
@@ -3135,108 +3184,109 @@ int main(int argc, const char **argv) {
     return EXIT_SUCCESS;
   }
 
-  if (leftover_args.size() != 1) {
+  if (leftover_args.size() == 0) {
     cerr << opt_parse.help_message() << endl;
     return EXIT_SUCCESS;
   }
 
-  if (config.kmer_size > MAX_KMER_SIZE) {
-    cerr << "K-mer size should not exceed << " << MAX_KMER_SIZE << "\n";
-    cerr << opt_parse.help_message() << endl;
-    return EXIT_SUCCESS;
+  for (auto file : leftover_args) {
+    auto file_start = system_clock::now();
+    config.filename = file;
+
+    // if format was not provided, we have to guess it by the filename
+    if (!forced_file_format.empty())
+      config.format = forced_file_format;
+    else
+      config.format = "";
+
+    /****************** BEGIN PROCESSING CONFIG ******************/
+    config.setup();  // define file type, read limits, adapters, contaminants
+
+    /****************** END PROCESSING CONFIG *******************/
+    if (!config.quiet)
+      log_process("Started reading file " +config.filename);
+
+    // Allocates vectors to summarize data
+    FastqStats stats = FastqStats();
+
+    // Initializes a reader given the file format
+    if (config.format == "sam") {
+      log_process("reading file as sam format");
+      SamReader in(config, stats.kNumBases);
+      read_stream_into_stats(in,stats,config);
+    }
+    else if (config.format == "bam") {
+      log_process("reading file as bam format");
+      BamReader in (config, stats.kNumBases);
+      read_stream_into_stats(in,stats,config);
+    }
+
+    else if (config.compressed) {
+      log_process("reading file as gzipped fastq format");
+      GzFastqReader in (config, stats.kNumBases);
+      read_stream_into_stats(in,stats,config);
+    }
+    else {
+      log_process("reading file as uncompressed fastq format");
+      FastqReader in (config, stats.kNumBases);
+      read_stream_into_stats(in,stats,config);
+    }
+
+    if (!config.quiet)
+      log_process("Finished reading file");
+
+    if (!config.quiet)
+      log_process("Summarizing data");
+
+    // This function has to be called before writing to output. This is where we
+    // calculate all the summary statistics that will be written to output. 
+    stats.summarize(config);
+    /************************ WRITE TO OUTPUT *****************************/
+    string outfile = file;
+    if (!outdir.empty())
+      outfile = outdir + "/" + strip_path(file);
+    outfile += "_qc_data.txt";
+
+    if (!config.quiet)
+      log_process("Writing text data to " + outfile);
+
+    // define output
+    ofstream of (outfile);
+
+    // Write
+    stats.write(of, config);
+    of.close();
+
+    /************************ WRITE TO HTML *****************************/
+    // Take the html template and populate it with stats data. 
+    // Use config to know which parts not to write
+    HTMLFactory factory ("Configuration/template.html");
+    factory.write (stats, config);
+
+    // Decide html filename based on input
+    string htmlfile = file;
+    if (!outdir.empty())
+      htmlfile = outdir + "/" + strip_path(file);
+    htmlfile += "_report.html";
+
+    if (!config.quiet)
+      log_process("Writing HTML report to " + htmlfile);
+
+    // Start writing
+    ofstream html (htmlfile);
+    html << factory.sourcecode;
+    html.close();
+
+    /************** TIME SUMMARY *********************************/
+    if (!config.quiet) 
+      cerr << "Elapsed time for file " << file << ": " <<
+      std::chrono::duration_cast<std::chrono::seconds>(
+          system_clock::now() - file_start
+      ).count() 
+      << "s\n";
   }
 
-  if (config.kmer_size < 2) {
-    cerr << "K-mer size should be larger than 2\n";
-    cerr << opt_parse.help_message() << endl;
-    return EXIT_SUCCESS;
-  }
-
-  config.filename = leftover_args.front();
-
-  /****************** BEGIN PROCESSING CONFIG ******************/
-  config.setup();  // define file type, read limits, adapters, contaminants, etc
-
-  /****************** END PROCESSING CONFIG *******************/
-  if (!config.quiet)
-    log_process("Started reading file " +config.filename);
-
-  // Allocates vectors to summarize data
-  FastqStats stats(config);
-
-  // Initializes a reader given the file format
-  if (config.format == "sam") {
-    log_process("reading file as sam format");
-    SamReader in(config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config);
-  }
-  else if (config.format == "bam") {
-    log_process("reading file as bam format");
-    BamReader in (config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config);
-  }
-
-  else if (config.compressed) {
-    log_process("reading file as gzipped fastq format");
-    GzFastqReader in (config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config);
-  }
-  else {
-    log_process("reading file as uncompressed fastq format");
-    FastqReader in (config, stats.kNumBases);
-    read_stream_into_stats(in,stats,config);
-  }
-
-  if (!config.quiet)
-    log_process("Finished reading file");
-
-  if (!config.quiet)
-    log_process("Summarizing data");
-
-  // This function has to be called before writing to output. This is where we
-  // calculate all the summary statistics that will be written to output. 
-  stats.summarize(config);
-  /************************ WRITE TO OUTPUT *****************************/
-  if (!config.quiet)
-    log_process("Writing data");
-
-  // define output
-  ofstream of;
-  if (!config.outfile.empty())
-    of.open(config.outfile.c_str(), ofstream::binary);
-
-  ostream os(config.outfile.empty() ? cout.rdbuf() : of.rdbuf());
-
-  // Write
-  stats.write(os, config);
-  /************************ WRITE TO HTML *****************************/
-  if (!config.quiet)
-    log_process("Making html.");
-  HTMLFactory factory ("Configuration/template.html");
-  factory.put_file_details(config);
-  factory.comment_out(config);
-  factory.put_pass_warn_fail (stats, config);
-  factory.make_basic_statistics (stats, config);
-  factory.make_position_quality_data (stats, config);
-  factory.make_tile_quality_data (stats, config);
-  factory.make_sequence_quality_data (stats, config);
-  factory.make_base_sequence_content_data (stats, config);
-  factory.make_sequence_gc_content_data (stats, config);
-  factory.make_base_n_content_data (stats, config);
-  factory.make_sequence_length_data (stats, config);
-  factory.make_sequence_duplication_data (stats, config);
-  factory.make_overrepresented_sequences_data (stats, config);
-  factory.make_adapter_content_data (stats, config);
-  ofstream html (config.outfile + ".html");
-  html << factory.sourcecode;
-  html.close();
-  /************** TIME SUMMARY *********************************/
-  if (!config.quiet) 
-    cerr << "Elapsed time: " << 
-    std::chrono::duration_cast<std::chrono::seconds>(
-        system_clock::now() - start
-    ).count() 
-    << "s\n";
+  return EXIT_SUCCESS;
 }
 
 
