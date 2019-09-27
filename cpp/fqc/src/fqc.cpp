@@ -144,8 +144,8 @@ double get_corrected_count (size_t count_at_limit,
   if (count_at_limit == num_reads)
     return num_obs;
 
-  // If there aren't enough sequences left to hide another sequence with this count then
-  // we can also skip the calculation
+  // If there aren't enough sequences left to hide another sequence with this 
+  // count the we can also skip the calculation
   if (num_reads - num_obs < count_at_limit) 
     return num_obs;
 
@@ -157,11 +157,12 @@ double get_corrected_count (size_t count_at_limit,
   // the probability of seeing it.
   double p_not_seeing = 1.0;
 
-  // To save doing long calculations which are never going to produce anything meaningful
-  // we'll set a limit to our p-value calculation.  This is the probability below which we
-  // won't increase our count by 0.01 of an observation.  Once we're below this we stop caring
-  // about the corrected value since it's going to be so close to the observed value that
-  // we can just return that instead.
+  // To save doing long calculations which are never going to produce anything 
+  // meaningful we'll set a limit to our p-value calculation.  This is the 
+  // probability below which we won't increase our count by 0.01 of an 
+  // observation.  Once we're below this we stop caring about the corrected 
+  // value since it's going to be so close to the observed value thatwe can 
+  // just return that instead.
   double limit_of_caring = 1.0 - (num_obs/(num_obs + 0.01));
   for (size_t i = 0; i < count_at_limit; ++i) {
     p_not_seeing *= static_cast<double>((num_reads-i)-dup_level) /
@@ -546,7 +547,7 @@ Config::get_matching_contaminant (string seq) const {
 
 struct FastqStats {
   // number of bases for static allocation. 
-  static const size_t kNumBases = 200;
+  static const size_t kNumBases = 500;
 
   // Value to subtract quality characters to get the actual quality value
   static const size_t kBaseQuality = 33;  // The ascii for the lowest quality
@@ -560,7 +561,8 @@ struct FastqStats {
   static const size_t kNumNucleotides = 4;  // A = 00,C = 01,T = 10,G = 11
 
   // maximum tile value
-  static const size_t kNumMaxTiles = 16384;
+  static const size_t kNumMaxTiles = 2048;
+  static const size_t kMinTileNumber = 10000;
 
   // Maximum number of bases for which to do kmer statistics
   static const size_t kKmerMaxBases = 500;
@@ -1344,11 +1346,11 @@ FastqStats::write(ostream &os, const Config &config) {
         for (size_t j = 0; j < max_read_length; ++j) {
           if (j < kNumBases) {
             tile_ind = (j << kBitShiftTile) | i;
-            os << i << "\t" << j + 1 << "\t" << 
+            os << i + kMinTileNumber << "\t" << j + 1 << "\t" <<
               tile_position_quality[tile_ind];
           } else {
             tile_ind = ((j - kNumBases) << kBitShiftTile) | i;
-            os << i << "\t" << j + 1 << "\t" << 
+            os << i + kMinTileNumber << "\t" << j + 1 << "\t" << 
               long_tile_position_quality[tile_ind];
           }
           os << "\n";
@@ -1741,6 +1743,7 @@ StreamReader::read_tile_line(FastqStats &stats){
   }
   else {
     get_tile_value();
+    tile_cur -= stats.kMinTileNumber;
   }
 }
 
