@@ -1172,7 +1172,6 @@ FastqStats::summarize(Config &config) {
       jj = 0;
       for (auto v : config.adapters) {
 
-        cerr << v.first << "\t" << i << "\t" << kmer_by_base[i][jj] << "\n";
         kmer_by_base[i][jj] = kmer_by_base[i][jj] * 100.0 / num_reads_kmer;
 
         // Update pass warn fail
@@ -1471,15 +1470,16 @@ class StreamReader{
   char base_from_buffer;
 
   // This will tell me which character to look for to go to the next field
-  const char separator;
+  const char field_separator;
 
-  // Memory map variables
-  char *curr;  // current position in file
-  char *last;  // last position in file
-  char *buffer;
+  // This will tell me which character to look for to finish processing a record
+  const char line_separator;
+
 
   // buffer size to store line 2 of each read
   const size_t buffer_size;
+  char *buffer;
+  char *cur_char; // pointer to current read character
 
   // Number of bases that have overflown the buffer
   size_t leftover_ind;
@@ -1505,8 +1505,8 @@ class StreamReader{
 
   /************ FUNCTIONS TO PROCESS READS AND BASES ***********/
   // gets and puts bases from and to buffer
-  inline void put_base();  // puts base in buffer or leftover
-  inline void get_base();  // gets base from buffer or leftover
+  inline void put_base_in_buffer();  // puts base in buffer or leftover
+  inline void get_base_from_buffer();  // gets base from buffer or leftover
 
   inline void get_tile_split_position();
   inline void get_tile_value();
@@ -1529,18 +1529,22 @@ class StreamReader{
 
   StreamReader (Config &config,
                 const size_t buffer_size,
-                const char _separator);
+                const char _field_separator,
+                const char _line_separator);
 
   /************ FUNCTIONS TO IMPLEMENT BASED ON FILE FORMAT  ***********/
   virtual void load() = 0;
-  virtual inline bool operator >> (FastqStats &stats) = 0;
+  virtual bool operator >> (FastqStats &stats) = 0;
+  virtual bool is_eof() = 0; // whether file has ended
   virtual ~StreamReader() = 0;
 };
 
 StreamReader::StreamReader(Config &config,
                            const size_t _buffer_size,
-                           const char _separator) : 
-  separator (_separator),
+                           const char _field_separator,
+                           const char _line_separator) : 
+  field_separator (_field_separator),
+  line_separator (_line_separator),
   buffer_size (_buffer_size) {
 
   // Allocates buffer to temporarily store reads
@@ -1581,8 +1585,8 @@ StreamReader::~StreamReader () {
 /*******************************************************/
 // puts base either on buffer or leftover
 inline void
-StreamReader::put_base() {
-  base_from_buffer = *curr;
+StreamReader::put_base_in_buffer() {
+  base_from_buffer = *cur_char;
   if (write_to_buffer) {
     buffer[read_pos] = base_from_buffer;
   } else {
@@ -1595,7 +1599,7 @@ StreamReader::put_base() {
 
 // Gets base from either buffer or leftover
 inline void
-StreamReader::get_base() {
+StreamReader::get_base_from_buffer() {
   if (read_from_buffer) {
     base_from_buffer = buffer[read_pos];
   } else {
@@ -1610,13 +1614,13 @@ StreamReader::get_base() {
 // Keeps going forward while the current character is a separator
 inline void
 StreamReader::skip_separator() {
-  for(; *curr == separator; ++curr) {}
+  for(; *cur_char == field_separator; ++cur_char) {}
 }
 
 // Skips lines that are not relevant
 inline void
 StreamReader::read_fast_forward_line(){
-  for (; *curr != separator; ++curr) {}
+  for (; *cur_char != field_separator; ++cur_char) {}
 }
 
 /*******************************************************/
@@ -1628,8 +1632,8 @@ StreamReader::get_tile_split_position(){
   size_t num_colon = 0;
 
   // Count colons to know the formatting pattern
-  for (; *curr != separator; ++curr) {
-    if (*curr == ':')
+  for (; *cur_char != field_separator; ++cur_char) {
+    if (*cur_char == ':')
       ++num_colon;
   }
 
@@ -1649,16 +1653,16 @@ inline void
 StreamReader::get_tile_value() {
   tile_cur = 0;
   size_t num_colon = 0;
-  for(; *curr != separator; ++curr) {
-    if (*curr == ':')
+  for(; *cur_char != field_separator; ++cur_char) {
+    if (*cur_char == ':')
       ++num_colon;
 
     if (num_colon == tile_split_point) {
-      ++curr;  // pass the colon
+      ++cur_char;
 
       // parse till next colon or \n
-      for(; (*curr != ':') && (*curr != separator); ++curr)
-        tile_cur = tile_cur*10 + (*curr - '0');
+      for(; (*cur_char != ':') && (*cur_char != field_separator); ++cur_char)
+        tile_cur = tile_cur*10 + (*cur_char - '0');
 
       ++num_colon;
     }
@@ -1786,9 +1790,9 @@ StreamReader::read_sequence_line(FastqStats &stats){
   /*********************************************************/
   /********** THIS LOOP MUST BE ALWAYS OPTIMIZED ***********/
   /*********************************************************/
-  for (; *curr != separator; ++curr) {
+  for (; *cur_char != field_separator; ++cur_char) {
     // puts base either on buffer or leftover 
-    put_base();
+    put_base_in_buffer();
     // Make sure we have memory space to process new base
     if (!write_to_buffer) {
       if (leftover_ind == stats.num_extra_bases) {
@@ -1809,10 +1813,10 @@ StreamReader::read_sequence_line(FastqStats &stats){
     // increase leftover position if not writing to buffer anymore
     if (!write_to_buffer)
       leftover_ind++;
-      
+
     // either way increase read position
     ++read_pos;
-    
+
     // if we reached the buffer size, stop
     if(read_pos == buffer_size) {
       write_to_buffer = false;
@@ -1836,7 +1840,7 @@ StreamReader::process_quality_base_from_buffer(FastqStats &stats) {
  // ATGC QUALITY STATS
   } else {
     base_ind = actg_to_2bit(base_from_buffer);
-    stats.base_quality[(read_pos << stats.kBitShiftNucleotide) | base_ind] 
+    stats.base_quality[(read_pos << stats.kBitShiftNucleotide) | base_ind]
          += quality_value;
   }
 
@@ -1895,11 +1899,11 @@ StreamReader::read_quality_line(FastqStats &stats){
   // For quality, we do not look for the separator, but rather for an explicit
   // newline or EOF in case the file does not end with newline or we are getting
   // decompressed strings from a stream
-  for (; (*curr != '\n') && (curr < last); ++curr) {
-    get_base();
+  for (; (*cur_char != line_separator); ++cur_char) {
+    get_base_from_buffer();
 
     // Converts quality ascii to zero-based
-    quality_value = *curr - stats.kBaseQuality;
+    quality_value = *cur_char - stats.kBaseQuality;
 
     // Fast bases from buffer 
     if (read_from_buffer) 
@@ -1978,6 +1982,7 @@ class FastqReader : public StreamReader {
  private:
   // for uncompressed
   struct stat st;
+  char *last;
   void *mmap_data;
 
  public:
@@ -1985,6 +1990,7 @@ class FastqReader : public StreamReader {
               const size_t _buffer_size);
 
   void load();
+  inline bool is_eof();
   inline bool operator >> (FastqStats &stats);
   ~FastqReader();
 };
@@ -1992,11 +1998,15 @@ class FastqReader : public StreamReader {
 // Set fastq separator as \n
 FastqReader::FastqReader (Config &_config,
                           const size_t _buffer_size) :
-StreamReader(_config, _buffer_size, '\n') {
-
+StreamReader(_config, _buffer_size, '\n', '\n') {
 }
 
-// Load fastq
+inline bool
+FastqReader::is_eof () {
+  return cur_char == (last + 1);
+}
+
+// Load uncompressed fastq through memory map
 void
 FastqReader::load() {
   // uncompressed fastq = memorymap
@@ -2014,8 +2024,8 @@ FastqReader::load() {
     throw runtime_error("failed to mmap fastq file: " + filename);
 
   // Initialize position pointer
-  curr = static_cast<char*>(mmap_data);
-  last = curr + st.st_size - 1;
+  cur_char = static_cast<char*>(mmap_data);
+  last = cur_char + st.st_size - 1;
 }
 
 // Parses the particular fastq format
@@ -2023,24 +2033,102 @@ inline bool
 FastqReader::operator >> (FastqStats &stats) {
   read_tile_line(stats);
   skip_separator();
+
   read_sequence_line(stats);
   skip_separator();
+
   read_fast_forward_line();
   skip_separator();
+
   read_quality_line(stats);
   skip_separator();
+
   postprocess_fastq_record(stats);
 
   // Successful read, increment number in stats
   stats.num_reads++;
 
   // Returns if file should keep being checked
-  return (curr < last - 1);
+  return !is_eof();
 }
 
 FastqReader::~FastqReader()  {
   munmap(mmap_data, st.st_size);
 }
+/*******************************************************/
+/*************** READ FASTQ GZ RCORD *******************/
+/*******************************************************/
+class GzFastqReader : public FastqReader {
+ private:
+  static const size_t chunk_size = 16384;
+  char gzbuf[chunk_size];
+  gzFile fileobj;
+ 
+ public:
+  GzFastqReader(Config &_config,
+                const size_t _buffer_size);
+  void load();
+  inline bool is_eof(); 
+  inline bool operator >> (FastqStats &stats);
+  ~GzFastqReader();
+};
+
+// Set fastq separator as \n
+GzFastqReader::GzFastqReader (Config &_config,
+                              const size_t _buffer_size) :
+FastqReader(_config, _buffer_size) {
+}
+
+// Load fastq
+void
+GzFastqReader::load() {
+  fileobj = gzopen(filename.c_str(), "r");
+  cur_char = new char[1];
+  ++cur_char;
+}
+
+inline bool
+GzFastqReader::is_eof() {
+  return gzeof(fileobj);
+}
+
+
+GzFastqReader::~GzFastqReader() {
+  gzclose_r (fileobj);
+}
+// Parses the particular fastq format
+inline bool
+GzFastqReader::operator >> (FastqStats &stats) {
+  cur_char = gzgets (fileobj, gzbuf, chunk_size);
+
+  // need to check here if we did not hit eof
+  if(is_eof())
+    return false;
+
+  read_tile_line(stats);
+  skip_separator();
+
+  cur_char = gzgets (fileobj, gzbuf, chunk_size);
+  read_sequence_line(stats);
+  skip_separator();
+
+  cur_char = gzgets (fileobj, gzbuf, chunk_size);
+  read_fast_forward_line();
+  skip_separator();
+
+  cur_char = gzgets (fileobj, gzbuf, chunk_size);
+  read_quality_line(stats);
+  skip_separator();
+
+  postprocess_fastq_record(stats);
+
+  // Successful read, increment number in stats
+  stats.num_reads++;
+
+  // Returns if file should keep being checked
+  return !is_eof();
+}
+
 /*******************************************************/
 /*************** READ SAM RECORD ***********************/
 /*******************************************************/
@@ -2050,13 +2138,22 @@ class SamReader : public StreamReader {
   // for uncompressed
   struct stat st;
   void *mmap_data;
+  char *last;
  public:
   SamReader (Config &_config, 
              const size_t _buffer_size);
   void load();
+  inline bool is_eof();
   inline bool operator >> (FastqStats &stats);
   ~SamReader();
 };
+
+// set sam separator as tab
+SamReader::SamReader (Config &_config,
+                      const size_t _buffer_size) : 
+StreamReader(_config, _buffer_size, '\t', '\n') {
+
+}
 
 void
 SamReader::load() {
@@ -2075,17 +2172,22 @@ SamReader::load() {
     throw runtime_error("failed to mmap fastq file: " + filename);
 
   // Initialize position pointer
-  curr = static_cast<char*>(mmap_data);
-  last = curr + st.st_size - 1;
+  cur_char = static_cast<char*>(mmap_data);
+  last = cur_char + st.st_size - 1;
 
-  // TODO (gui): skip sam header if it exists
+  // Skip sam header
+  while (*cur_char == '@') {
+    for(; *cur_char != '\n';) {
+      read_fast_forward_line();
+      skip_separator();
+    }
+    ++cur_char; // skip newline
+  }
 }
 
-// set sam separator as tab
-SamReader::SamReader (Config &_config,
-                      const size_t _buffer_size) : 
-StreamReader(_config, _buffer_size, '\t') {
-
+inline bool
+SamReader::is_eof() {
+  return (cur_char == last + 1);
 }
 
 inline bool
@@ -2100,89 +2202,25 @@ SamReader::operator >> (FastqStats &stats) {
   read_quality_line(stats);
 
   // skips all tags after quality until newline
-  while (*curr != '\n') {
+  while (*cur_char != line_separator) {
     read_fast_forward_line(); 
     skip_separator();
   }
 
   // skip \n
-  ++curr;
-
+  ++cur_char;
+  cerr << buffer << "\n";
   postprocess_fastq_record(stats);
   stats.num_reads++;
 
   // Returns if file should keep being checked
-  return (curr < last - 1);
+  return !is_eof();
 
 }
 
 SamReader::~SamReader() {
   munmap(mmap_data, st.st_size);
 }
-
-/*******************************************************/
-/*************** READ FASTQ GZ RCORD *******************/
-/*******************************************************/
-class GzFastqReader : public StreamReader {
- private:
-   static const size_t chunk_size = 16384;
-   char gzbuf[chunk_size];
-   char peeker;
-   gzFile fileobj;
- public:
-  GzFastqReader(Config &_config,
-                const size_t _buffer_size);
-  void load();
-  inline bool operator >> (FastqStats &stats);
-  ~GzFastqReader();
-};
-
-// Set fastq separator as \n
-GzFastqReader::GzFastqReader (Config &_config,
-                              const size_t _buffer_size) :
-StreamReader(_config, _buffer_size, '\n') {
-}
-
-// Load fastq
-void
-GzFastqReader::load() {
-  fileobj = gzopen(filename.c_str(), "r");
-}
-
-// Parses the particular fastq format
-inline bool
-GzFastqReader::operator >> (FastqStats &stats) {
-  curr = gzgets (fileobj, gzbuf, chunk_size);
-
-  // We need to check here if we actually got a new line
-  if (gzeof(fileobj)) 
-    return false;
-  read_tile_line(stats);
-  skip_separator();
-
-  curr = gzgets (fileobj, gzbuf, chunk_size);
-  read_sequence_line(stats);
-  skip_separator();
-
-  curr = gzgets (fileobj, gzbuf, chunk_size);
-  read_fast_forward_line();
-  skip_separator();
-
-  curr = gzgets (fileobj, gzbuf, chunk_size);
-  last = curr + strlen(curr);
-  read_quality_line(stats);
-  skip_separator();
-  postprocess_fastq_record(stats);
-
-  // Successful read, increment number in stats
-  stats.num_reads++;
-  return !gzeof(fileobj);
-}
-
-GzFastqReader::~GzFastqReader() {
-  gzclose_r (fileobj);
-}
-
 /*******************************************************/
 /*************** READ BAM RECORD ***********************/
 /*******************************************************/
@@ -2193,14 +2231,23 @@ class BamReader : public StreamReader {
   bam_hdr_t *hdr;
   bam1_t *b;
   int rd_ret, fmt_ret;
-
+  char *last;
  public:
   BamReader (Config &_config, 
              const size_t _buffer_size);
   void load();
-  inline bool operator >> (FastqStats &stats);
+  bool is_eof();
+  bool operator >> (FastqStats &stats);
   ~BamReader();
 };
+
+// set sam separator as tab
+BamReader::BamReader (Config &_config,
+                      const size_t _buffer_size) : 
+StreamReader(_config, _buffer_size, '\t', '\n') {
+  rd_ret = 0;
+
+}
 
 void
 BamReader::load() {
@@ -2215,12 +2262,10 @@ BamReader::load() {
 
 }
 
-// set sam separator as tab
-BamReader::BamReader (Config &_config,
-                      const size_t _buffer_size) : 
-StreamReader(_config, _buffer_size, '\t') {
-  rd_ret = 0;
-
+// We will check eof on the >> operator
+bool 
+BamReader::is_eof (){
+  return cur_char == last - 1;
 }
 
 inline bool
@@ -2229,8 +2274,8 @@ BamReader::operator >> (FastqStats &stats) {
     fmt_ret = 0;
     if ((fmt_ret = sam_format1(hdr, b, &hts->line)) > 0) {
       // define char* values for processing lines char by char
-      curr = hts->line.s;
-      last = curr + strlen (hts->line.s) - 1;
+      cur_char = hts->line.s;
+      last = cur_char + strlen (hts->line.s) - 1;
 
       // Now read it as regular sam
       read_tile_line(stats);
@@ -2239,10 +2284,11 @@ BamReader::operator >> (FastqStats &stats) {
         read_fast_forward_line();
         skip_separator();
       }
+
       read_sequence_line(stats);
       read_quality_line(stats);
       postprocess_fastq_record(stats);
-
+      cerr << buffer << "\n";
       stats.num_reads++;
       return true;
     } else {
@@ -3075,4 +3121,5 @@ int main(int argc, const char **argv) {
     ).count() 
     << "s\n";
 }
+
 
