@@ -1,4 +1,4 @@
-/* fqc: quality control for fastq files
+/* fqc: quality control for fastq fiCes
 *
 * Copyright (C) 2019 Guilherme De Sena Brandine and
 *                    Andrew D. Smith
@@ -258,6 +258,19 @@ struct Config {
   bool quiet;
   string tmpdir;  // dir for temp files when generating report images
 
+  // config on how to handle reads
+  bool do_duplication,
+       do_kmer,
+       do_n_content,
+       do_overrepresented,
+       do_quality_base,
+       do_sequence,
+       do_gc_sequence,
+       do_quality_sequence,
+       do_tile,
+       do_adapter,
+       do_sequence_length;
+
   /************************************************************
    *************** FASTQC LIMITS *******************************
    ************************************************************/
@@ -397,6 +410,20 @@ Config::read_limits (){
                            " not found in file " + limits_file);
   }
   in.close();
+
+  // Get useful data from config that tells us which analyses to skip
+  do_duplication = (limits["duplication"]["ignore"] == 0.0);
+  do_kmer = (limits["kmer"]["ignore"] == 0.0);
+  do_n_content = (limits["n_content"]["ignore"] == 0.0);
+  do_overrepresented = (limits["overrepresented"]["ignore"] == 0.0);
+  do_quality_base = (limits["quality_base"]["ignore"] == 0.0);
+  do_sequence = (limits["sequence"]["ignore"] == 0.0);
+  do_gc_sequence = (limits["gc_sequence"]["ignore"] == 0.0);
+  do_quality_sequence= (limits["quality_sequence"]["ignore"] == 0.0);
+  do_tile = (limits["tile"]["ignore"] == 0.0);
+  do_adapter = (limits["adapter"]["ignore"] == 0.0);
+  do_sequence_length = (limits["sequence_length"]["ignore"] == 0.0);
+
 }
 
 void 
@@ -589,10 +616,6 @@ struct FastqStats {
   array<size_t, kNumNucleotides * kNumBases> base_count;  // ATGC
   array<size_t, kNumNucleotides * kNumBases> n_base_count; // N
 
-  // Sum of base qualities in every read position
-  array<size_t, kNumNucleotides* kNumBases> base_quality;  // ATGC
-  array<size_t, kNumBases> n_base_quality;  // N
-
   /*********** PER QUALITY VALUE METRICS ****************/
   // Counts of quality in each base position
   array<size_t, kNumQualityValues * kNumBases> position_quality_count;
@@ -635,8 +658,6 @@ struct FastqStats {
   // Leftover memory using dynamic allocation
   vector<size_t> long_base_count;
   vector<size_t> long_n_base_count;
-  vector<size_t> long_base_quality;
-  vector<size_t> long_n_base_quality;
   vector<size_t> long_position_quality_count;
   vector<size_t> long_read_length_freq;
   vector<size_t> long_cumulative_read_length_freq;
@@ -724,8 +745,6 @@ FastqStats::FastqStats(const Config &config) {
   // Initialize IO arrays
   base_count.fill(0);
   n_base_count.fill(0);
-  base_quality.fill(0);
-  n_base_quality.fill(0);
   read_length_freq.fill(0);
   quality_count.fill(0);
   gc_count.fill(0);
@@ -752,11 +771,6 @@ FastqStats::allocate_new_base(const bool ignore_tile) {
   for (size_t i = 0; i < kNumNucleotides; ++i)
     long_base_count.push_back(0);
   long_n_base_count.push_back (0);
-
-  // space to allocate quality average
-  for (size_t i = 0; i < kNumNucleotides; ++i)
-    long_base_quality.push_back(0);
-  long_n_base_quality.push_back(0);
 
   // space for quality boxplot
   for (size_t i = 0; i < kNumQualityValues; ++i)
@@ -836,390 +850,403 @@ FastqStats::summarize(Config &config) {
   }
 
   /******************* PER BASE SEQUENCE QUALITY **********************/
-  pass_per_base_sequence_quality = "pass";
+  if (config.do_quality_base) {
+    pass_per_base_sequence_quality = "pass";
 
-  // Quality quantiles for base positions
-  size_t cur;  // for readability, get the quality x position count
-  double ldecile_thresh, 
-         lquartile_thresh,
-         median_thresh,
-         uquartile_thresh,
-         udecile_thresh;
+    // Quality quantiles for base positions
+    size_t cur;  // for readability, get the quality x position count
+    double ldecile_thresh, 
+           lquartile_thresh,
+           median_thresh,
+           uquartile_thresh,
+           udecile_thresh;
 
-  size_t cur_ldecile = 0,
-         cur_lquartile = 0,
-         cur_median = 0,
-         cur_uquartile = 0,
-         cur_udecile = 0;
+    size_t cur_ldecile = 0,
+           cur_lquartile = 0,
+           cur_median = 0,
+           cur_uquartile = 0,
+           cur_udecile = 0;
 
-  double cur_mean;
-  for (size_t i = 0; i < max_read_length; ++i) {
-    cur_mean = 0;
-    size_t counts = 0;
+    double cur_mean;
+    for (size_t i = 0; i < max_read_length; ++i) {
+      cur_mean = 0;
+      size_t counts = 0;
 
-    // Number of counts I need to see to know in which bin each *ile is
-    if (i < kNumBases) {
-      ldecile_thresh = 0.1 * cumulative_read_length_freq[i];
-      lquartile_thresh = 0.25 * cumulative_read_length_freq[i];
-      median_thresh = 0.5 * cumulative_read_length_freq[i];
-      uquartile_thresh = 0.75 * cumulative_read_length_freq[i];
-      udecile_thresh = 0.9 * cumulative_read_length_freq[i];
-    } else {
-      ldecile_thresh = 0.1 * long_cumulative_read_length_freq[i - kNumBases];
-      lquartile_thresh = 0.25 * long_cumulative_read_length_freq[i - kNumBases];
-      median_thresh = 0.5 * long_cumulative_read_length_freq[i - kNumBases];
-      uquartile_thresh = 0.75 * long_cumulative_read_length_freq[i - kNumBases];
-      udecile_thresh = 0.9 * long_cumulative_read_length_freq[i - kNumBases];
-    }
-    // Iterate through quality values to find quantiles in increasing order
-    for (size_t j = 0; j < kNumQualityValues; ++j) {
+      // Number of counts I need to see to know in which bin each *ile is
+      if (i < kNumBases) {
+        ldecile_thresh = 0.1 * cumulative_read_length_freq[i];
+        lquartile_thresh = 0.25 * cumulative_read_length_freq[i];
+        median_thresh = 0.5 * cumulative_read_length_freq[i];
+        uquartile_thresh = 0.75 * cumulative_read_length_freq[i];
+        udecile_thresh = 0.9 * cumulative_read_length_freq[i];
+      } else {
+        ldecile_thresh = 0.1 * long_cumulative_read_length_freq[i - kNumBases];
+        lquartile_thresh = 0.25 * long_cumulative_read_length_freq[i - kNumBases];
+        median_thresh = 0.5 * long_cumulative_read_length_freq[i - kNumBases];
+        uquartile_thresh = 0.75 * long_cumulative_read_length_freq[i - kNumBases];
+        udecile_thresh = 0.9 * long_cumulative_read_length_freq[i - kNumBases];
+      }
+      // Iterate through quality values to find quantiles in increasing order
+      for (size_t j = 0; j < kNumQualityValues; ++j) {
+        if (i < kNumBases)
+          cur = position_quality_count[(i << kBitShiftQuality) | j];
+        else
+          cur = long_position_quality_count[((i - kNumBases) << kBitShiftQuality) | j];
+
+        // Finds in which bin of the histogram reads are
+        if (counts < ldecile_thresh && counts + cur >= ldecile_thresh)
+          cur_ldecile = j;
+
+        if (counts < lquartile_thresh && counts + cur >= lquartile_thresh)
+          cur_lquartile = j;
+
+        if (counts < median_thresh && counts + cur >= median_thresh)
+          cur_median = j;
+
+        if (counts < uquartile_thresh && counts + cur >= uquartile_thresh)
+          cur_uquartile = j;
+
+        if (counts < udecile_thresh && counts + cur >= udecile_thresh)
+          cur_udecile = j;
+
+        cur_mean += cur*j;
+        counts += cur;
+      }
+
+      // Normalize mean
       if (i < kNumBases)
-        cur = position_quality_count[(i << kBitShiftQuality) | j];
+        cur_mean = cur_mean / cumulative_read_length_freq[i];
       else
-        cur = long_position_quality_count[((i - kNumBases) << kBitShiftQuality) | j];
+        cur_mean = cur_mean / long_cumulative_read_length_freq[i - kNumBases];
 
-      // Finds in which bin of the histogram reads are
-      if (counts < ldecile_thresh && counts + cur >= ldecile_thresh)
-        cur_ldecile = j;
+      if (i < kNumBases) {
+        mean[i] = cur_mean;
+        ldecile[i] = cur_ldecile;
+        lquartile[i] = cur_lquartile;
+        median[i] = cur_median;
+        uquartile[i] = cur_uquartile;
+        udecile[i] = cur_udecile;
+      } else {
+        long_mean.push_back(cur_mean);
+        long_ldecile.push_back(cur_ldecile);
+        long_lquartile.push_back(cur_lquartile);
+        long_median.push_back(cur_median);
+        long_uquartile.push_back(cur_uquartile);
+        long_udecile.push_back(cur_udecile);
+      }
 
-      if (counts < lquartile_thresh && counts + cur >= lquartile_thresh)
-        cur_lquartile = j;
+      // Pass warn fail criteria
+      if (pass_per_base_sequence_quality != "fail") {
+        if (cur_lquartile < config.limits["quality_base_lower"]["error"])
+          pass_per_base_sequence_quality = "fail";
+        else if (cur_lquartile < config.limits["quality_base_lower"]["warn"])
+          pass_per_base_sequence_quality = "warn";
 
-      if (counts < median_thresh && counts + cur >= median_thresh)
-        cur_median = j;
-
-      if (counts < uquartile_thresh && counts + cur >= uquartile_thresh)
-        cur_uquartile = j;
-
-      if (counts < udecile_thresh && counts + cur >= udecile_thresh)
-        cur_udecile = j;
-
-      cur_mean += cur*j;
-      counts += cur;
-    }
-
-    // Normalize mean
-    if (i < kNumBases)
-      cur_mean = cur_mean / cumulative_read_length_freq[i];
-    else
-      cur_mean = cur_mean / long_cumulative_read_length_freq[i - kNumBases];
-
-    if (i < kNumBases) {
-      mean[i] = cur_mean;
-      ldecile[i] = cur_ldecile;
-      lquartile[i] = cur_lquartile;
-      median[i] = cur_median;
-      uquartile[i] = cur_uquartile;
-      udecile[i] = cur_udecile;
-    } else {
-      long_mean.push_back(cur_mean);
-      long_ldecile.push_back(cur_ldecile);
-      long_lquartile.push_back(cur_lquartile);
-      long_median.push_back(cur_median);
-      long_uquartile.push_back(cur_uquartile);
-      long_udecile.push_back(cur_udecile);
-    }
-
-    // Pass warn fail criteria
-    if (pass_per_base_sequence_quality != "fail") {
-      if (cur_lquartile < config.limits["quality_base_lower"]["error"])
-        pass_per_base_sequence_quality = "fail";
-      else if (cur_lquartile < config.limits["quality_base_lower"]["warn"])
-        pass_per_base_sequence_quality = "warn";
-
-      if (cur_median < config.limits["quality_base_median"]["error"])
-        pass_per_base_sequence_quality = "fail";
-      else if (cur_median < config.limits["quality_base_median"]["warn"])
-        pass_per_base_sequence_quality = "warn";
+        if (cur_median < config.limits["quality_base_median"]["error"])
+          pass_per_base_sequence_quality = "fail";
+        else if (cur_median < config.limits["quality_base_median"]["warn"])
+          pass_per_base_sequence_quality = "warn";
+      }
     }
   }
-
   /******************* PER SEQUENCE QUALITY SCORE **********************/
-  pass_per_sequence_quality_scores = "pass";
-  size_t mode_val = 0;
-  size_t mode_ind = 0;
-  for (size_t i = 0; i < kNumQualityValues; ++i) {
-    if (quality_count[i] > mode_val) {
-      mode_val = quality_count[i];
-      mode_ind = i;
+  if (config.do_quality_sequence) {
+    pass_per_sequence_quality_scores = "pass";
+    size_t mode_val = 0;
+    size_t mode_ind = 0;
+    for (size_t i = 0; i < kNumQualityValues; ++i) {
+      if (quality_count[i] > mode_val) {
+        mode_val = quality_count[i];
+        mode_ind = i;
+      }
     }
+
+    if (mode_ind < config.limits["quality_sequence"]["warn"])
+      pass_per_sequence_quality_scores = "warn";
+
+    else if (mode_ind < config.limits["quality_sequence"]["error"])
+      pass_per_sequence_quality_scores = "fail";
   }
-
-  if (mode_ind < config.limits["quality_sequence"]["warn"])
-    pass_per_sequence_quality_scores = "warn";
-
-  else if (mode_ind < config.limits["quality_sequence"]["error"])
-    pass_per_sequence_quality_scores = "fail";
-
   /******************* PER BASE SEQUENCE CONTENT **********************/
-  pass_per_base_sequence_content = "pass";
-  double a, t, g, c, n;
-  double total;
-  double max_diff = 0.0;
-  for (size_t i = 0; i < max_read_length; ++i) {
-    if (i < kNumBases) {
-      a = base_count[(i << kBitShiftNucleotide)];
-      c = base_count[(i << kBitShiftNucleotide) | 1];
-      t = base_count[(i << kBitShiftNucleotide) | 2];
-      g = base_count[(i << kBitShiftNucleotide) | 3];
-      n = n_base_count[i];
-    } else {
-      a = long_base_count[((i - kNumBases) << kBitShiftNucleotide)];
-      c = long_base_count[((i - kNumBases) << kBitShiftNucleotide) | 1];
-      t = long_base_count[((i - kNumBases) << kBitShiftNucleotide) | 2];
-      g = long_base_count[((i - kNumBases) << kBitShiftNucleotide) | 3];
-      n = long_n_base_count[i - kNumBases];
-    }
+  if (config.do_sequence) {
+    pass_per_base_sequence_content = "pass";
+    double a, t, g, c, n;
+    double total;
+    double max_diff = 0.0;
+    for (size_t i = 0; i < max_read_length; ++i) {
+      if (i < kNumBases) {
+        a = base_count[(i << kBitShiftNucleotide)];
+        c = base_count[(i << kBitShiftNucleotide) | 1];
+        t = base_count[(i << kBitShiftNucleotide) | 2];
+        g = base_count[(i << kBitShiftNucleotide) | 3];
+        n = n_base_count[i];
+      } else {
+        a = long_base_count[((i - kNumBases) << kBitShiftNucleotide)];
+        c = long_base_count[((i - kNumBases) << kBitShiftNucleotide) | 1];
+        t = long_base_count[((i - kNumBases) << kBitShiftNucleotide) | 2];
+        g = long_base_count[((i - kNumBases) << kBitShiftNucleotide) | 3];
+        n = long_n_base_count[i - kNumBases];
+      }
 
-    // turns above values to percent
-    total = static_cast<double>(a + c + t + g + n);
-    a = 100.0*a / total;
-    c = 100.0*c / total;
-    t = 100.0*t / total;
-    g = 100.0*g / total;
-    n = 100.0*n / total;
-    if (i < kNumBases) {
-      g_pct[i] = g;
-      a_pct[i] = a;
-      t_pct[i] = t;
-      c_pct[i] = c;
-      n_pct[i] = n;
-    } else {
-      long_g_pct.push_back(g);
-      long_a_pct.push_back(a);
-      long_t_pct.push_back(t);
-      long_c_pct.push_back(c);
-      long_n_pct.push_back(n);
-    }
+      // turns above values to percent
+      total = static_cast<double>(a + c + t + g + n);
+      a = 100.0*a / total;
+      c = 100.0*c / total;
+      t = 100.0*t / total;
+      g = 100.0*g / total;
+      n = 100.0*n / total;
+      if (i < kNumBases) {
+        g_pct[i] = g;
+        a_pct[i] = a;
+        t_pct[i] = t;
+        c_pct[i] = c;
+        n_pct[i] = n;
+      } else {
+        long_g_pct.push_back(g);
+        long_a_pct.push_back(a);
+        long_t_pct.push_back(t);
+        long_c_pct.push_back(c);
+        long_n_pct.push_back(n);
+      }
 
-    max_diff = max(max_diff, fabs(a-c));
-    max_diff = max(max_diff, fabs(a-t));
-    max_diff = max(max_diff, fabs(a-g));
-    max_diff = max(max_diff, fabs(c-t));
-    max_diff = max(max_diff, fabs(c-g));
-    max_diff = max(max_diff, fabs(t-g));
+      max_diff = max(max_diff, fabs(a-c));
+      max_diff = max(max_diff, fabs(a-t));
+      max_diff = max(max_diff, fabs(a-g));
+      max_diff = max(max_diff, fabs(c-t));
+      max_diff = max(max_diff, fabs(c-g));
+      max_diff = max(max_diff, fabs(t-g));
 
-    if (pass_per_base_sequence_content != "fail") {
-      if (max_diff > config.limits["sequence"]["error"])
-        pass_per_base_sequence_content = "fail";
-      else if (max_diff > config.limits["sequence"]["warn"])
-        pass_per_base_sequence_content = "warn";
-    }
-  }
-
-  /******************* PER SEQUENCE GC CONTENT *****************/
-  pass_per_sequence_gc_content = "pass";
-  // fix the zero gcs by averaging around the adjacent values
-  for (size_t i = 1; i < 99; ++i) 
-    if (gc_count[i] == 0)
-      gc_count[i] = (gc_count[i+1] + gc_count[i-1])/2;
-
-  // Calculate pass warn fail statistics
-  double gc_deviation = sum_deviation_from_normal(gc_count, 
-                                                  theoretical_gc_count);
-  if (gc_deviation >= config.limits["gc_sequence"]["error"])
-    pass_per_sequence_gc_content = "fail";
-  else if (gc_deviation >= config.limits["gc_sequence"]["warn"])
-    pass_per_sequence_gc_content = "warn";
-
-  /******************* PER BASE N CONTENT **********************/
-
-  pass_per_base_n_content = "pass";
-  double cur_n_pct;
-  for (size_t i = 0; i < max_read_length; ++i) {
-    if (pass_per_base_n_content != "fail") {
-      if (i < kNumBases)
-        cur_n_pct = n_pct[i];
-      else
-        cur_n_pct = long_n_pct[i - kNumBases];
-
-      if (cur_n_pct > config.limits["n_content"]["error"]) {
-        pass_per_base_n_content = "fail";
-      } else if (cur_n_pct > config.limits["n_content"]["warn"])
-        pass_per_base_n_content = "warn";
-    }
-  }
-
-  /************** SEQUENCE LENGTH DISTRIBUTION *****************/
-  pass_sequence_length_distribution = "pass";
-  size_t freq_of_avg;
-  
-  if (avg_read_length < kNumBases)
-    freq_of_avg = read_length_freq[avg_read_length];
-  else
-    freq_of_avg = long_read_length_freq[avg_read_length - kNumBases];
-
-  if (config.limits["sequence_length"]["error"] == 1) {
-    if (freq_of_avg != num_reads)
-      pass_sequence_length_distribution = "warn";
-    if (read_length_freq[0] > 0)
-      pass_sequence_length_distribution = "fail";
-  }
-
-  /************** DUPLICATE SEQUENCES **************************/
-  pass_duplicate_sequences = "pass";
-
-  double seq_total = 0.0;
-  double seq_dedup = 0.0;
-
-  // Key is frequenccy (r), value is number of times we saw a sequence
-  // with that frequency
-  unordered_map <size_t, size_t> counts_by_freq;
-  for (auto v : sequence_count) {
-    if(counts_by_freq.count(v.second) == 0)
-      counts_by_freq[v.second] = 0;
-    counts_by_freq[v.second]++;
-  }
-
-  // Now we run the fastqc corrected extrapolation
-  for (auto v: counts_by_freq) {
-    counts_by_freq[v.first] = get_corrected_count (count_at_limit,
-                                                   num_reads,
-                                                   v.first,
-                                                   v.second);
-  }
-
-  // Group in blocks similarly to fastqc
-  for (auto v : counts_by_freq) {
-    size_t dup_slot = v.first - 1;
-    if (v.first >= 10000) dup_slot = 15;
-    else if (v.first >= 5000) dup_slot = 14;
-    else if (v.first >= 1000) dup_slot = 13;
-    else if (v.first >= 500) dup_slot = 12;
-    else if (v.first >= 100) dup_slot = 11;
-    else if (v.first >= 50) dup_slot = 10;
-    else if (v.first >= 10) dup_slot = 9;
-
-    percentage_deduplicated[dup_slot] += v.second;
-    percentage_total[dup_slot] += v.second * v.first;
-
-    seq_total += v.second * v.first;
-    seq_dedup += v.second;
-  }
-
-  // "Sequence duplication estimate" in the summary
-  total_deduplicated_pct = 100.0 * seq_dedup / seq_total;
-
-  // Convert to percentage
-  for (auto &v : percentage_deduplicated)
-    v = 100.0 * v / seq_dedup;  // Percentage of unique sequences in bin
-
-   // Convert to percentage
-  for (auto &v : percentage_total)
-    v = 100.0 * v / seq_total;  // Percentage of sequences in bin
-
-  // pass warn fail criteria : unique reads must be >80%
-  // (otherwise warn) or >50% (otherwisefail)
-  if (percentage_total[0] <= config.limits["duplication"]["error"])
-    pass_duplicate_sequences = "fail";
-
-  else if (percentage_total[0] <= config.limits["duplication"]["warn"])
-    pass_duplicate_sequences = "warn";
-
-  /************** OVERREPRESENTED SEQUENCES ********************/
-  pass_overrepresented_sequences = "pass";
-
-  // Keep only sequences that pass the input cutoff
-  for (auto it = sequence_count.begin(); it != sequence_count.end(); ++it) {
-    if (it->second > num_reads * config.kOverrepMinFrac) {
-      overrep_sequences.push_back (*it);
-    }
-
-    // implment pass warn fail for overrep sequences
-    if (pass_overrepresented_sequences != "fail") {
-      // get percentage that overrep reads represent
-      double pct = 100.0 * it->second / num_reads;
-      if (pct > config.limits["overrepresented"]["error"])
-        pass_overrepresented_sequences = "fail";
-      else if (pct > config.limits["overrepresented"]["warn"])
-        pass_overrepresented_sequences = "warn";
-    }
-  }
-
-  // Sort strings by frequency
-  sort(overrep_sequences.begin(), overrep_sequences.end(),
-       [](auto &a, auto &b){
-          return a.second > b.second;
-          });
-  /************** ADAPTER CONTENT ******************************/
-  pass_adapter_content = "pass";
-
-  // Cumulative count of adapter kmers by position
-  size_t jj;
-  for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
-
-      // Makes the count of kmers by position cumulative by copying
-      // the previous position count
-      if (i == 0)
-        kmer_by_base[i] = vector<double> (config.adapters.size(), 0.0);
-      else
-        kmer_by_base[i] = vector<double> (kmer_by_base[i-1].begin(),
-                                          kmer_by_base[i-1].end());
-      jj = 0;
-
-      // Get count for adapter's k-prefix 
-      for (auto v : config.adapters) {
-        size_t kmer_ind = (i << kBitShiftKmer) | v.second;
-        kmer_by_base[i][jj] += kmer_count[kmer_ind];
-        ++jj;
+      if (pass_per_base_sequence_content != "fail") {
+        if (max_diff > config.limits["sequence"]["error"])
+          pass_per_base_sequence_content = "fail";
+        else if (max_diff > config.limits["sequence"]["warn"])
+          pass_per_base_sequence_content = "warn";
       }
     }
   }
 
-  for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
-      jj = 0;
-      for (auto v : config.adapters) {
+  /******************* PER SEQUENCE GC CONTENT *****************/
+  if (config.do_gc_sequence) {
+    pass_per_sequence_gc_content = "pass";
+    // fix the zero gcs by averaging around the adjacent values
+    for (size_t i = 1; i < 99; ++i) 
+      if (gc_count[i] == 0)
+        gc_count[i] = (gc_count[i+1] + gc_count[i-1])/2;
 
-        kmer_by_base[i][jj] = kmer_by_base[i][jj] * 100.0 / num_reads_kmer;
+    // Calculate pass warn fail statistics
+    double gc_deviation = sum_deviation_from_normal(gc_count, 
+                                                    theoretical_gc_count);
+    if (gc_deviation >= config.limits["gc_sequence"]["error"])
+      pass_per_sequence_gc_content = "fail";
+    else if (gc_deviation >= config.limits["gc_sequence"]["warn"])
+      pass_per_sequence_gc_content = "warn";
+  }
+  /******************* PER BASE N CONTENT **********************/
+  if (config.do_n_content) {
+    pass_per_base_n_content = "pass";
+    double cur_n_pct;
+    for (size_t i = 0; i < max_read_length; ++i) {
+      if (pass_per_base_n_content != "fail") {
+        if (i < kNumBases)
+          cur_n_pct = n_pct[i];
+        else
+          cur_n_pct = long_n_pct[i - kNumBases];
 
-        // Update pass warn fail
-        if (pass_adapter_content != "fail") {
-          if (kmer_by_base[i][jj] > config.limits["adapter"]["error"])
-            pass_adapter_content = "fail";
-          else if (kmer_by_base[i][jj] > config.limits["adapter"]["warn"])
-            pass_adapter_content = "warn";
+        if (cur_n_pct > config.limits["n_content"]["error"]) {
+          pass_per_base_n_content = "fail";
+        } else if (cur_n_pct > config.limits["n_content"]["warn"])
+          pass_per_base_n_content = "warn";
+      }
+    }
+  }
+  /************** SEQUENCE LENGTH DISTRIBUTION *****************/
+  if (config.do_sequence_length) {
+    pass_sequence_length_distribution = "pass";
+    size_t freq_of_avg;
+    
+    if (avg_read_length < kNumBases)
+      freq_of_avg = read_length_freq[avg_read_length];
+    else
+      freq_of_avg = long_read_length_freq[avg_read_length - kNumBases];
+
+    if (config.limits["sequence_length"]["error"] == 1) {
+      if (freq_of_avg != num_reads)
+        pass_sequence_length_distribution = "warn";
+      if (read_length_freq[0] > 0)
+        pass_sequence_length_distribution = "fail";
+    }
+  }
+  /************** DUPLICATE SEQUENCES **************************/
+  if (config.do_duplication) {
+    pass_duplicate_sequences = "pass";
+
+    double seq_total = 0.0;
+    double seq_dedup = 0.0;
+
+    // Key is frequenccy (r), value is number of times we saw a sequence
+    // with that frequency
+    unordered_map <size_t, size_t> counts_by_freq;
+    for (auto v : sequence_count) {
+      if(counts_by_freq.count(v.second) == 0)
+        counts_by_freq[v.second] = 0;
+      counts_by_freq[v.second]++;
+    }
+
+    // Now we run the fastqc corrected extrapolation
+    for (auto v: counts_by_freq) {
+      counts_by_freq[v.first] = get_corrected_count (count_at_limit,
+                                                     num_reads,
+                                                     v.first,
+                                                     v.second);
+    }
+
+    // Group in blocks similarly to fastqc
+    for (auto v : counts_by_freq) {
+      size_t dup_slot = v.first - 1;
+      if (v.first >= 10000) dup_slot = 15;
+      else if (v.first >= 5000) dup_slot = 14;
+      else if (v.first >= 1000) dup_slot = 13;
+      else if (v.first >= 500) dup_slot = 12;
+      else if (v.first >= 100) dup_slot = 11;
+      else if (v.first >= 50) dup_slot = 10;
+      else if (v.first >= 10) dup_slot = 9;
+
+      percentage_deduplicated[dup_slot] += v.second;
+      percentage_total[dup_slot] += v.second * v.first;
+
+      seq_total += v.second * v.first;
+      seq_dedup += v.second;
+    }
+
+    // "Sequence duplication estimate" in the summary
+    total_deduplicated_pct = 100.0 * seq_dedup / seq_total;
+
+    // Convert to percentage
+    for (auto &v : percentage_deduplicated)
+      v = 100.0 * v / seq_dedup;  // Percentage of unique sequences in bin
+
+     // Convert to percentage
+    for (auto &v : percentage_total)
+      v = 100.0 * v / seq_total;  // Percentage of sequences in bin
+
+    // pass warn fail criteria : unique reads must be >80%
+    // (otherwise warn) or >50% (otherwisefail)
+    if (percentage_total[0] <= config.limits["duplication"]["error"])
+      pass_duplicate_sequences = "fail";
+
+    else if (percentage_total[0] <= config.limits["duplication"]["warn"])
+      pass_duplicate_sequences = "warn";
+  }
+  /************** OVERREPRESENTED SEQUENCES ********************/
+  if (config.do_overrepresented) {
+    pass_overrepresented_sequences = "pass";
+
+    // Keep only sequences that pass the input cutoff
+    for (auto it = sequence_count.begin(); it != sequence_count.end(); ++it) {
+      if (it->second > num_reads * config.kOverrepMinFrac) {
+        overrep_sequences.push_back (*it);
+      }
+
+      // implment pass warn fail for overrep sequences
+      if (pass_overrepresented_sequences != "fail") {
+        // get percentage that overrep reads represent
+        double pct = 100.0 * it->second / num_reads;
+        if (pct > config.limits["overrepresented"]["error"])
+          pass_overrepresented_sequences = "fail";
+        else if (pct > config.limits["overrepresented"]["warn"])
+          pass_overrepresented_sequences = "warn";
+      }
+    }
+
+    // Sort strings by frequency
+    sort(overrep_sequences.begin(), overrep_sequences.end(),
+         [](auto &a, auto &b){
+            return a.second > b.second;
+         });
+  }
+  /************** ADAPTER CONTENT ******************************/
+  if (config.do_adapter) {
+    pass_adapter_content = "pass";
+
+    // Cumulative count of adapter kmers by position
+    size_t jj;
+    for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
+      if (cumulative_read_length_freq[i] > 0) {
+
+        // Makes the count of kmers by position cumulative by copying
+        // the previous position count
+        if (i == 0)
+          kmer_by_base[i] = vector<double> (config.adapters.size(), 0.0);
+        else
+          kmer_by_base[i] = vector<double> (kmer_by_base[i-1].begin(),
+                                            kmer_by_base[i-1].end());
+        jj = 0;
+
+        // Get count for adapter's k-prefix 
+        for (auto v : config.adapters) {
+          size_t kmer_ind = (i << kBitShiftKmer) | v.second;
+          kmer_by_base[i][jj] += kmer_count[kmer_ind];
+          ++jj;
         }
-        ++jj;
+      }
+    }
+
+    for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
+      if (cumulative_read_length_freq[i] > 0) {
+        jj = 0;
+        for (auto v : config.adapters) {
+
+          kmer_by_base[i][jj] = kmer_by_base[i][jj] * 100.0 / num_reads_kmer;
+
+          // Update pass warn fail
+          if (pass_adapter_content != "fail") {
+            if (kmer_by_base[i][jj] > config.limits["adapter"]["error"])
+              pass_adapter_content = "fail";
+            else if (kmer_by_base[i][jj] > config.limits["adapter"]["warn"])
+              pass_adapter_content = "warn";
+          }
+          ++jj;
+        }
       }
     }
   }
 
   /************** PER TILE SEQUENCE QUALITY ********************/
-  pass_per_tile_sequence_quality = "pass";
+  if (config.do_tile) {
+    pass_per_tile_sequence_quality = "pass";
 
-  // Normalize by average: We can reuse the mean we calculated in per base
-  // quality distributions above.
-  size_t tile_ind;
-  for(size_t i = 0; i < max_read_length; ++i) {
-    for (size_t j = 0; j < kNumMaxTiles; ++j) {
-      if(tile_count[j] > 0){
-        if (i < kNumBases) {
-          tile_ind = (i << kBitShiftTile) | j;
-          tile_position_quality[tile_ind] =
-          tile_position_quality[tile_ind] / tile_count[j] - mean[i];
+    // Normalize by average: We can reuse the mean we calculated in per base
+    // quality distributions above.
+    size_t tile_ind;
+    for(size_t i = 0; i < max_read_length; ++i) {
+      for (size_t j = 0; j < kNumMaxTiles; ++j) {
+        if(tile_count[j] > 0){
+          if (i < kNumBases) {
+            tile_ind = (i << kBitShiftTile) | j;
+            tile_position_quality[tile_ind] =
+            tile_position_quality[tile_ind] / tile_count[j] - mean[i];
 
-          if(pass_per_tile_sequence_quality != "fail") {
-            if (tile_position_quality[tile_ind] <= config.limits["tile"]["error"])
-              pass_per_tile_sequence_quality = "fail";
+            if(pass_per_tile_sequence_quality != "fail") {
+              if (tile_position_quality[tile_ind] <= config.limits["tile"]["error"])
+                pass_per_tile_sequence_quality = "fail";
 
-            else if (tile_position_quality[tile_ind] <= config.limits["tile"]["warn"])
-              pass_per_tile_sequence_quality = "warn";
+              else if (tile_position_quality[tile_ind] <= config.limits["tile"]["warn"])
+                pass_per_tile_sequence_quality = "warn";
+            }
           }
-        }
-        else {
-          tile_ind = ((i - kNumBases) << kBitShiftTile) | j;
-          long_tile_position_quality[tile_ind] =
-          (long_tile_position_quality[tile_ind] / tile_count[j]) - long_mean[i - kNumBases];
+          else {
+            tile_ind = ((i - kNumBases) << kBitShiftTile) | j;
+            long_tile_position_quality[tile_ind] =
+            (long_tile_position_quality[tile_ind] / tile_count[j]) - long_mean[i - kNumBases];
 
-          if(pass_per_tile_sequence_quality != "fail") {
-            if (long_tile_position_quality[tile_ind] <=
-                -config.limits["tile"]["error"])
-              pass_per_tile_sequence_quality = "fail";
-            else if (long_tile_position_quality[tile_ind] <=
-                -config.limits["tile"]["warn"])
-              pass_per_tile_sequence_quality = "warn";
+            if(pass_per_tile_sequence_quality != "fail") {
+              if (long_tile_position_quality[tile_ind] <=
+                  -config.limits["tile"]["error"])
+                pass_per_tile_sequence_quality = "fail";
+              else if (long_tile_position_quality[tile_ind] <=
+                  -config.limits["tile"]["warn"])
+                pass_per_tile_sequence_quality = "warn";
+            }
           }
         }
       }
@@ -1243,193 +1270,208 @@ FastqStats::write(ostream &os, const Config &config) {
   os << ">>END_MODULE\n";
 
   // Per base quality
-  os << ">>Per base sequence quality\t" <<
-         pass_per_base_sequence_quality << "\n";
+  if (config.do_quality_base) {
+    os << ">>Per base sequence quality\t" <<
+           pass_per_base_sequence_quality << "\n";
 
-  os << "#Base\tMean\tMedian\tLower Quartile\tUpper Quartile" <<
-        "\t10th Percentile 90th Percentile\n";
-  for (size_t i = 0; i < max_read_length; ++i) {
-    if (i < kNumBases) {
-      // Write distribution to new line
-      os << i + 1 << "\t"
-         << mean[i] << "\t"
-         << median[i] << "\t"
-         << lquartile[i] << "\t"
-         << uquartile[i] << "\t"
-         << ldecile[i] << "\t"
-         << udecile[i] << "\n";
-    } else {
-      os << i + 1 << "\t"
-         << long_mean[i - kNumBases] << "\t"
-         << long_median[i - kNumBases] << "\t"
-         << long_lquartile[i - kNumBases] << "\t"
-         << long_uquartile[i - kNumBases] << "\t"
-         << long_ldecile[i - kNumBases] << "\t"
-         << long_udecile[i - kNumBases] << "\n";
+    os << "#Base\tMean\tMedian\tLower Quartile\tUpper Quartile" <<
+          "\t10th Percentile 90th Percentile\n";
+    for (size_t i = 0; i < max_read_length; ++i) {
+      if (i < kNumBases) {
+        // Write distribution to new line
+        os << i + 1 << "\t"
+           << mean[i] << "\t"
+           << median[i] << "\t"
+           << lquartile[i] << "\t"
+           << uquartile[i] << "\t"
+           << ldecile[i] << "\t"
+           << udecile[i] << "\n";
+      } else {
+        os << i + 1 << "\t"
+           << long_mean[i - kNumBases] << "\t"
+           << long_median[i - kNumBases] << "\t"
+           << long_lquartile[i - kNumBases] << "\t"
+           << long_uquartile[i - kNumBases] << "\t"
+           << long_ldecile[i - kNumBases] << "\t"
+           << long_udecile[i - kNumBases] << "\n";
+      }
     }
+    os << ">>END_MODULE\n";
   }
-  os << ">>END_MODULE\n";
 
   // Per sequence quality scores
-  os << ">>Per sequence quality scores\t" <<
-        pass_per_sequence_quality_scores << "\n";
+  if (config.do_quality_sequence) {
+    os << ">>Per sequence quality scores\t" <<
+          pass_per_sequence_quality_scores << "\n";
 
-  os << "#Quality\tCount\n";
+    os << "#Quality\tCount\n";
 
-  for (size_t i = 0; i < kNumQualityValues; ++i) {
-    if (quality_count[i] > 0)
-      os << i << "\t" << quality_count[i] << "\n";
-  }
-  os << ">>END_MODULE\n";
-
-  // Per base sequence content
-  os << ">>Per base sequence content\t" <<
-        pass_per_base_sequence_content << "\n";
-
-  os << "#Base\tG\tA\tT\tC\n";
-
-  for (size_t i = 0; i < max_read_length; ++i) {
-    if (i < kNumBases) {
-      os << i+1 << "\t" <<
-            g_pct[i] << "\t" <<
-            a_pct[i] << "\t" <<
-            t_pct[i] << "\t" <<
-            c_pct[i] << "\n";
-    } else {
-      os << i+1 << "\t" <<
-            long_g_pct[i - kNumBases] << "\t" <<
-            long_a_pct[i - kNumBases] << "\t" <<
-            long_t_pct[i - kNumBases] << "\t" <<
-            long_c_pct[i - kNumBases] << "\n";
+    for (size_t i = 0; i < kNumQualityValues; ++i) {
+      if (quality_count[i] > 0)
+        os << i << "\t" << quality_count[i] << "\n";
     }
+    os << ">>END_MODULE\n";
+
+    // Per base sequence content
+    os << ">>Per base sequence content\t" <<
+          pass_per_base_sequence_content << "\n";
+
+    os << "#Base\tG\tA\tT\tC\n";
+
+    for (size_t i = 0; i < max_read_length; ++i) {
+      if (i < kNumBases) {
+        os << i+1 << "\t" <<
+              g_pct[i] << "\t" <<
+              a_pct[i] << "\t" <<
+              t_pct[i] << "\t" <<
+              c_pct[i] << "\n";
+      } else {
+        os << i+1 << "\t" <<
+              long_g_pct[i - kNumBases] << "\t" <<
+              long_a_pct[i - kNumBases] << "\t" <<
+              long_t_pct[i - kNumBases] << "\t" <<
+              long_c_pct[i - kNumBases] << "\n";
+      }
+    }
+    os << ">>END_MODULE\n";
   }
-  os << ">>END_MODULE\n";
 
   // Per tile sequence quality
-  os << ">>Per tile sequence quality\t" <<
-        pass_per_tile_sequence_quality << "\n";
+  if (config.do_tile) {
+    os << ">>Per tile sequence quality\t" <<
+          pass_per_tile_sequence_quality << "\n";
 
-  size_t tile_ind;
-  for (size_t i = 0; i < kNumMaxTiles; ++i) {
-    if (tile_count[i] > 0) {
-      for (size_t j = 0; j < max_read_length; ++j) {
-        if (j < kNumBases) {
-          tile_ind = (j << kBitShiftTile) | i;
-          os << i << "\t" << j + 1 << "\t" << 
-            tile_position_quality[tile_ind];
-        } else {
-          tile_ind = ((j - kNumBases) << kBitShiftTile) | i;
-          os << i << "\t" << j + 1 << "\t" << 
-            long_tile_position_quality[tile_ind];
+    size_t tile_ind;
+    for (size_t i = 0; i < kNumMaxTiles; ++i) {
+      if (tile_count[i] > 0) {
+        for (size_t j = 0; j < max_read_length; ++j) {
+          if (j < kNumBases) {
+            tile_ind = (j << kBitShiftTile) | i;
+            os << i << "\t" << j + 1 << "\t" << 
+              tile_position_quality[tile_ind];
+          } else {
+            tile_ind = ((j - kNumBases) << kBitShiftTile) | i;
+            os << i << "\t" << j + 1 << "\t" << 
+              long_tile_position_quality[tile_ind];
+          }
+          os << "\n";
         }
-        os << "\n";
       }
     }
+
+    os << ">>END_MODULE\n";
   }
 
-  os << ">>END_MODULE\n";
   // Per sequence gc content
-  os << ">>Per sequence gc content\t" << pass_per_sequence_gc_content << "\n";
-  os << "#GC Content\tCount\n";
-  for (size_t i = 0; i <= 100; ++i) {
-    if (gc_count[i] > 0) {
-      os << i << "\t" << gc_count[i] << "\n";
+  if (config.do_gc_sequence) {
+    os << ">>Per sequence gc content\t" << pass_per_sequence_gc_content << "\n";
+    os << "#GC Content\tCount\n";
+    for (size_t i = 0; i <= 100; ++i) {
+      if (gc_count[i] > 0) {
+        os << i << "\t" << gc_count[i] << "\n";
+      }
     }
+    os << ">>END_MODULE\n";
+
+    // Per base N content
+    os << ">>Per base N concent\t" << pass_per_base_n_content << "\n";
+    os << "#Base\tN-Count\n";
+
+    for (size_t i = 0; i < max_read_length; ++i) {
+      if (i < kNumBases)
+        os << i+1 << "\t" << n_pct[i] << "\n";
+      else
+        os << i+1 << "\t" << long_n_pct[i - kNumBases] << "\n";
+    }
+
+    os << ">>END_MODULE\n";
   }
-  os << ">>END_MODULE\n";
-
-  // Per base N content
-  os << ">>Per base N concent\t" << pass_per_base_n_content << "\n";
-  os << "#Base\tN-Count\n";
-
-  for (size_t i = 0; i < max_read_length; ++i) {
-    if (i < kNumBases)
-      os << i+1 << "\t" << n_pct[i] << "\n";
-    else
-      os << i+1 << "\t" << long_n_pct[i - kNumBases] << "\n";
-  }
-
-  os << ">>END_MODULE\n";
 
   // Sequence length distribution
-  os << "Sequence Length Distribution\t" <<
-        pass_sequence_length_distribution << "\n";
+  if (config.do_sequence_length) {
+    os << "Sequence Length Distribution\t" <<
+          pass_sequence_length_distribution << "\n";
 
-  os << "Length\tCount\n";
-  for (size_t i = 0; i < max_read_length; ++i) {
-    if(i < kNumBases) {
-      if (read_length_freq[i] > 0)
-        os << i+1 << "\t" << read_length_freq[i] << "\n";
-    } else {
-      if (long_read_length_freq[i - kNumBases] > 0)
-        os << i + 1  << "\t" << long_read_length_freq[i - kNumBases] << "\n";
+    os << "Length\tCount\n";
+    for (size_t i = 0; i < max_read_length; ++i) {
+      if(i < kNumBases) {
+        if (read_length_freq[i] > 0)
+          os << i+1 << "\t" << read_length_freq[i] << "\n";
+      } else {
+        if (long_read_length_freq[i - kNumBases] > 0)
+          os << i + 1  << "\t" << long_read_length_freq[i - kNumBases] << "\n";
+      }
     }
+    os << ">>END_MODULE\n";
   }
-  os << ">>END_MODULE\n";
 
   // Sequence duplication levels
-  os << ">>Sequence Duplication Levels\t" <<
-         pass_duplicate_sequences << "\n";
+  if (config.do_duplication) {
+    os << ">>Sequence Duplication Levels\t" <<
+           pass_duplicate_sequences << "\n";
 
-  os << ">>Total Deduplicated Percentage\t" <<
-         total_deduplicated_pct << "\n";
+    os << ">>Total Deduplicated Percentage\t" <<
+           total_deduplicated_pct << "\n";
 
-  os << "#Duplication Level  Percentage of deduplicated  Percentage of total\n";
-  for(size_t i = 0; i < 9; ++i)
-    os << i+1 << "\t" << percentage_deduplicated[i] << "\t"
-       << percentage_total[i] << "\n";
+    os << "#Duplication Level  Percentage of deduplicated  Percentage of total\n";
+    for(size_t i = 0; i < 9; ++i)
+      os << i+1 << "\t" << percentage_deduplicated[i] << "\t"
+         << percentage_total[i] << "\n";
 
-  os << ">10\t" << percentage_deduplicated[9]
-     << "\t" << percentage_total[9] << "\n";
-  os << ">50\t" << percentage_deduplicated[10]
-     << "\t" << percentage_total[10] << "\n";
-  os << ">100\t" << percentage_deduplicated[11]
-     << "\t" << percentage_total[11] << "\n";
-  os << ">500\t" << percentage_deduplicated[12]
-     << "\t" << percentage_total[12] << "\n";
-  os << ">1k\t" << percentage_deduplicated[13]
-     << "\t" << percentage_total[13] << "\n";
-  os << ">5k\t" << percentage_deduplicated[14]
-     << "\t" << percentage_total[14] << "\n";
-  os << ">10k+\t" << percentage_deduplicated[15]
-     << "\t" << percentage_total[15] << "\n";
-  os << ">>END_MOUDLE\n";
+    os << ">10\t" << percentage_deduplicated[9]
+       << "\t" << percentage_total[9] << "\n";
+    os << ">50\t" << percentage_deduplicated[10]
+       << "\t" << percentage_total[10] << "\n";
+    os << ">100\t" << percentage_deduplicated[11]
+       << "\t" << percentage_total[11] << "\n";
+    os << ">500\t" << percentage_deduplicated[12]
+       << "\t" << percentage_total[12] << "\n";
+    os << ">1k\t" << percentage_deduplicated[13]
+       << "\t" << percentage_total[13] << "\n";
+    os << ">5k\t" << percentage_deduplicated[14]
+       << "\t" << percentage_total[14] << "\n";
+    os << ">10k+\t" << percentage_deduplicated[15]
+       << "\t" << percentage_total[15] << "\n";
+    os << ">>END_MOUDLE\n";
+  }
 
   // Overrepresented sequences
-  os << ">>Overrepresented sequences\t" <<
-        pass_overrepresented_sequences << "\n";
-  os << "#Sequence\tCount\tPercentage\tPossible Source\n";
+  if (config.do_overrepresented) {
+    os << ">>Overrepresented sequences\t" <<
+          pass_overrepresented_sequences << "\n";
+    os << "#Sequence\tCount\tPercentage\tPossible Source\n";
 
-  for (auto seq : overrep_sequences)
-      os << seq.first << "\t" << seq.second <<  "\t" <<
-        100.0 * seq.second / num_reads << "\t"
-        << config.get_matching_contaminant(seq.first) << "\n";
-  os << ">>END_MODULE\n";
-  os << ">>Adapter Content\t" << pass_adapter_content << "\n";
+    for (auto seq : overrep_sequences)
+        os << seq.first << "\t" << seq.second <<  "\t" <<
+          100.0 * seq.second / num_reads << "\t"
+          << config.get_matching_contaminant(seq.first) << "\n";
+    os << ">>END_MODULE\n";
+    os << ">>Adapter Content\t" << pass_adapter_content << "\n";
 
-  os << "#Position\t";
-  for (auto v : config.adapters)
-    os << v.first << "\t";
+    os << "#Position\t";
+    for (auto v : config.adapters)
+      os << v.first << "\t";
 
-  os << "\n";
+    os << "\n";
 
-  // Number of kmers counted
-  size_t jj;
-  for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
-    if (cumulative_read_length_freq[i] > 0) {
-      os << i + 1 << "\t";
-      jj = 0;
-      for (auto v : config.adapters) {
-        os << 100.0 * kmer_by_base[i][jj];
-        ++jj;
+    // Number of kmers counted
+    size_t jj;
+    for (size_t i = 0; i < min(kNumBases, kKmerMaxBases); ++i) {
+      if (cumulative_read_length_freq[i] > 0) {
+        os << i + 1 << "\t";
+        jj = 0;
+        for (auto v : config.adapters) {
+          os << 100.0 * kmer_by_base[i][jj];
+          ++jj;
 
-        if(jj != config.adapters.size())
-          os << " ";
+          if(jj != config.adapters.size())
+            os << " ";
+        }
+          os << "\n";
       }
-        os << "\n";
     }
+    os << ">>END_MODULE\n";
   }
-  os << ">>END_MODULE\n";
 }
 
 /*************************************************************
@@ -1440,16 +1482,26 @@ FastqStats::write(ostream &os, const Config &config) {
 class StreamReader{
  public:
   // config on how to handle reads
-  bool do_duplication,
-       do_kmer,
-       do_n_content,
-       do_overrepresented,
-       do_quality_base,
-       do_sequence,
-       do_gc_sequence,
-       do_quality_sequence,
-       do_tile,
-       do_sequence_length;
+  const bool do_duplication,
+             do_kmer,
+             do_n_content,
+             do_overrepresented,
+             do_quality_base,
+             do_sequence,
+             do_gc_sequence,
+             do_quality_sequence,
+             do_tile,
+             do_adapter,
+             do_sequence_length;
+
+  // buffer size to store line 2 of each read statically
+  const size_t buffer_size;
+
+  // This will tell me which character to look for to go to the next field
+  const char field_separator;
+
+  // This will tell me which character to look for to finish processing a record
+  const char line_separator;
 
   // keep track of reads for which to do kmer and tile count
   const size_t num_reads_for_kmer = 50;
@@ -1468,15 +1520,6 @@ class StreamReader{
   // Get a base from the sequence line
   char base_from_buffer;
 
-  // This will tell me which character to look for to go to the next field
-  const char field_separator;
-
-  // This will tell me which character to look for to finish processing a record
-  const char line_separator;
-
-
-  // buffer size to store line 2 of each read
-  const size_t buffer_size;
   char *buffer;
   char *cur_char; // pointer to current read character
 
@@ -1542,34 +1585,37 @@ StreamReader::StreamReader(Config &config,
                            const size_t _buffer_size,
                            const char _field_separator,
                            const char _line_separator) : 
+  // I have to pass the config skips as const to read them fast
+  do_duplication(config.do_duplication),
+  do_kmer(config.do_kmer),
+  do_n_content(config.do_n_content),
+  do_overrepresented(config.do_overrepresented),
+  do_quality_base(config.do_quality_base),
+  do_sequence(config.do_sequence),
+  do_gc_sequence(config.do_gc_sequence),
+  do_quality_sequence(config.do_quality_sequence),
+  do_tile(config.do_tile),
+  do_adapter(config.do_adapter),
+  do_sequence_length(config.do_sequence_length),
+
+  // Here are the usual stream reader configs
+  buffer_size (_buffer_size),
   field_separator (_field_separator),
-  line_separator (_line_separator),
-  buffer_size (_buffer_size) {
+  line_separator (_line_separator) {
 
   // Allocates buffer to temporarily store reads
   buffer = new char[buffer_size + 1];
   buffer[buffer_size] = '\0';
 
   // Tile init
-  tile_ignore= false;
-  tile_cur= 0;
+  tile_ignore = !do_tile;  //early ignore tile if asked to skip it
+  tile_cur = 0;
   tile_split_point = 0;
   next_tile_read = 0;
 
   // kmer init
   next_kmer_read = 0;
-  // Get useful data from config that tells us which analyses to skip
-  do_duplication = (config.limits["duplication"]["ignore"] == 0.0);
-  do_kmer = (config.limits["kmer"]["ignore"] == 0.0);
-  do_n_content = (config.limits["n_content"]["ignore"] == 0.0);
-  do_overrepresented = (config.limits["overrepresented"]["ignore"] == 0.0);
-  do_quality_base = (config.limits["quality_base"]["ignore"] == 0.0);
-  do_sequence = (config.limits["sequence"]["ignore"] == 0.0);
-  do_gc_sequence = (config.limits["gc_sequence"]["ignore"] == 0.0);
-  do_quality_sequence= (config.limits["quality_sequence"]["ignore"] == 0.0);
-  do_tile = (config.limits["tile"]["ignore"] == 0.0);
-  do_sequence_length = (config.limits["sequence_length"]["ignore"] == 0.0);
-
+ 
   // Subclasses will use this to deflate if necessary
   filename = config.filename;
 }
@@ -1632,19 +1678,15 @@ StreamReader::get_tile_split_position(){
 
   // Count colons to know the formatting pattern
   for (; *cur_char != field_separator; ++cur_char) {
-    if (*cur_char == ':')
-      ++num_colon;
+    if (*cur_char == ':') ++num_colon;
   }
 
   // Copied from fastqc
-  if (num_colon >= 6)
-    tile_split_point = 4;
-  else if (num_colon >=4)
-    tile_split_point = 2;
+  if (num_colon >= 6) tile_split_point = 4;
+  else if (num_colon >=4) tile_split_point = 2;
 
   // We will not get a tile out of this
-  else
-    tile_ignore= true;
+  else tile_ignore = true;
 
 }
 
@@ -1653,16 +1695,14 @@ StreamReader::get_tile_value() {
   tile_cur = 0;
   size_t num_colon = 0;
   for(; *cur_char != field_separator; ++cur_char) {
-    if (*cur_char == ':')
-      ++num_colon;
-
+    if (*cur_char == ':') ++num_colon;
     if (num_colon == tile_split_point) {
       ++cur_char;
 
       // parse till next colon or \n
-      for(; (*cur_char != ':') && (*cur_char != field_separator); ++cur_char)
+      for(; (*cur_char != ':') && (*cur_char != field_separator); ++cur_char) {
         tile_cur = tile_cur*10 + (*cur_char - '0');
-
+      }
       ++num_colon;
     }
   }
@@ -1702,6 +1742,7 @@ StreamReader::read_tile_line(FastqStats &stats){
 // optimized at all times
 inline void
 StreamReader::process_sequence_base_from_buffer(FastqStats &stats) {
+  // I will count the Ns even if asked to ignore, as checking ifs take time
   if(base_from_buffer == 'N') {
     stats.n_base_count[read_pos]++;
     num_bases_after_n = 1;  // start over the current kmer
@@ -1716,18 +1757,20 @@ StreamReader::process_sequence_base_from_buffer(FastqStats &stats) {
     cur_gc_count += (base_ind & 1);
     stats.base_count[(read_pos << stats.kBitShiftNucleotide) | base_ind]++;
 
-    if (stats.num_reads == next_kmer_read) {
-      if (read_pos < stats.kKmerMaxBases) {
-        cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
+    if (do_adapter) {
+      if (stats.num_reads == next_kmer_read) {
+        if (read_pos < stats.kKmerMaxBases) {
+          cur_kmer = ((cur_kmer << stats.kBitShiftNucleotide) | base_ind);
 
-        // registers k-mer if we've seen at least k nucleotides since the last n
-        if (num_bases_after_n == stats.kmer_size) {
-          stats.kmer_count[(read_pos << stats.kBitShiftKmer) 
-                         | (cur_kmer & stats.kmer_mask)]++;
+          // registers k-mer if we've seen at least k nucleotides since the last n
+          if (num_bases_after_n == stats.kmer_size) {
+            stats.kmer_count[(read_pos << stats.kBitShiftKmer) 
+                           | (cur_kmer & stats.kmer_mask)]++;
+          }
+
+          else
+            num_bases_after_n++;
         }
-
-        else
-          num_bases_after_n++;
       }
     }
   }
@@ -1750,9 +1793,8 @@ StreamReader::process_sequence_base_from_leftover(FastqStats &stats) {
 
     // increments basic statistic counts
     cur_gc_count += (base_ind & 1);
-
-    size_t test = (leftover_ind << stats.kBitShiftNucleotide) | base_ind;
-    stats.long_base_count[test]++;
+    stats.long_base_count[(leftover_ind << stats.kBitShiftNucleotide)
+                         | base_ind]++;
 
     // WE WILL NOT DO KMER STATS OUTSIDE OF BUFFER
   }
@@ -1761,18 +1803,21 @@ StreamReader::process_sequence_base_from_leftover(FastqStats &stats) {
 // Gets statistics after reading the entire sequence line
 inline void
 StreamReader::postprocess_sequence_line(FastqStats &stats) {
-  // read length frequency histogram
-  if((read_pos != 0) && (read_pos <= stats.kNumBases))
-    stats.read_length_freq[read_pos - 1]++;
-  else
-    stats.long_read_length_freq[leftover_ind - 1]++;
+  if (do_sequence_length) {
+    // read length frequency histogram
+    if((read_pos != 0) && (read_pos <= stats.kNumBases))
+      stats.read_length_freq[read_pos - 1]++;
+    else
+      stats.long_read_length_freq[leftover_ind - 1]++;
+  }
 
   // Updates maximum read length if applicable
   if (read_pos > stats.max_read_length)
     stats.max_read_length = read_pos;
 
   // Registers GC % in the bin truncated to the nearest integer
-  stats.gc_count[round(100 * cur_gc_count / static_cast<double>(read_pos))]++;
+  if (do_gc_sequence)
+    stats.gc_count[round(100 * cur_gc_count / static_cast<double>(read_pos))]++;
 
 }
 
@@ -1810,8 +1855,9 @@ StreamReader::read_sequence_line(FastqStats &stats){
       process_sequence_base_from_leftover(stats);
     }
     // increase leftover position if not writing to buffer anymore
-    if (!write_to_buffer)
+    if (!write_to_buffer) {
       leftover_ind++;
+    }
 
     // either way increase read position
     ++read_pos;
@@ -1832,17 +1878,6 @@ StreamReader::read_sequence_line(FastqStats &stats){
 // Process quality value the fast way from buffer
 inline void
 StreamReader::process_quality_base_from_buffer(FastqStats &stats) {
-  // N quality stats
-  if (base_from_buffer == 'N') {
-    stats.n_base_quality[read_pos] += quality_value;
-
- // ATGC QUALITY STATS
-  } else {
-    base_ind = actg_to_2bit(base_from_buffer);
-    stats.base_quality[(read_pos << stats.kBitShiftNucleotide) | base_ind]
-         += quality_value;
-  }
-
   // Average quality in position
   stats.position_quality_count[
         (read_pos << stats.kBitShiftQuality) | quality_value]++;
@@ -1859,30 +1894,16 @@ StreamReader::process_quality_base_from_buffer(FastqStats &stats) {
 // Slow version of function above
 inline void
 StreamReader::process_quality_base_from_leftover(FastqStats &stats) {
-
-  // N quality stats
-  if (base_from_buffer == 'N') {
-    stats.long_n_base_quality[leftover_ind] += quality_value;
-
- // ATGC QUALITY STATS
-  } else {
-    base_ind = actg_to_2bit(base_from_buffer);
-
-    stats.long_base_quality[(leftover_ind << stats.kBitShiftNucleotide) | base_ind] 
-         += quality_value;
-  }
-
   // Average quality in position
   stats.long_position_quality_count[
         (leftover_ind << stats.kBitShiftQuality) | quality_value]++;
 
   // Tile processing
-  if (!tile_ignore)
+  if (!tile_ignore) {
     if ((stats.num_reads == next_tile_read) && tile_cur > 0) {
-
       stats.long_tile_position_quality[(leftover_ind << stats.kBitShiftTile) | tile_cur]
           += quality_value;
-
+    }
   }
 }
 
@@ -1905,18 +1926,21 @@ StreamReader::read_quality_line(FastqStats &stats){
     quality_value = *cur_char - stats.kBaseQuality;
 
     // Fast bases from buffer 
-    if (read_from_buffer) 
+    if (read_from_buffer) {
       process_quality_base_from_buffer(stats);
+    }
 
     // Slow bases from dynamic allocation
-    else
+    else {
       process_quality_base_from_leftover(stats);
+    }
 
     // Sums quality value so we can bin the average at the end
     cur_quality += quality_value;
 
-    if (!read_from_buffer)
+    if (!read_from_buffer) {
       ++leftover_ind;
+    }
 
     // Flag to start reading and writing outside of buffer
     ++read_pos;
@@ -1927,7 +1951,9 @@ StreamReader::read_quality_line(FastqStats &stats){
 
   // Average quality approximated to the nearest integer. Used to make a
   // histogram in the end of the summary.
-  stats.quality_count[cur_quality / read_pos]++;  // avg quality histogram
+  if (do_quality_sequence) {
+    stats.quality_count[cur_quality / read_pos]++;  // avg quality histogram
+  }
 }
 
 /*******************************************************/
@@ -1938,39 +1964,44 @@ StreamReader::read_quality_line(FastqStats &stats){
 inline void
 StreamReader::postprocess_fastq_record(FastqStats &stats) {
 
-  // if reads are >75pb, truncate to 50
-  if(read_pos <= stats.kDupReadMaxSize)
-    buffer[read_pos] = '\0';
-  else
-    buffer[stats.kDupReadTruncateSize] = '\0';
-  sequence_to_hash = string(buffer);
+  if (do_overrepresented || do_duplication) {
+    // if reads are >75pb, truncate to 50
+    if(read_pos <= stats.kDupReadMaxSize)
+      buffer[read_pos] = '\0';
+    else
+      buffer[stats.kDupReadTruncateSize] = '\0';
+    sequence_to_hash = string(buffer);
 
-  // New sequence found 
-  if(stats.sequence_count.count(sequence_to_hash) == 0) {
-    if (stats.num_unique_seen != stats.kDupUniqueCutoff) {
-      stats.sequence_count.insert({{sequence_to_hash, 1}});
-      stats.count_at_limit = stats.num_reads;
-      ++stats.num_unique_seen;
+    // New sequence found 
+    if(stats.sequence_count.count(sequence_to_hash) == 0) {
+      if (stats.num_unique_seen != stats.kDupUniqueCutoff) {
+        stats.sequence_count.insert({{sequence_to_hash, 1}});
+        stats.count_at_limit = stats.num_reads;
+        ++stats.num_unique_seen;
+      }
+    } else {
+      stats.sequence_count[sequence_to_hash]++;
+      if (stats.num_unique_seen < stats.kDupUniqueCutoff)
+        stats.count_at_limit = stats.num_reads;
     }
-  } else {
-    stats.sequence_count[sequence_to_hash]++;
-    if (stats.num_unique_seen < stats.kDupUniqueCutoff)
-      stats.count_at_limit = stats.num_reads;
   }
 
   // counts tile if applicable
-  if (!tile_ignore)
+  if (!tile_ignore) {
     if (stats.num_reads == next_tile_read) {
       next_tile_read += num_reads_for_tile;
       stats.num_reads_tile++;
       if (tile_cur > 0)
         stats.tile_count[tile_cur]++;
     }
+  }
 
   // I counted kmers here so register that I did so
-  if (stats.num_reads == next_kmer_read) {
-    next_kmer_read += num_reads_for_kmer;
-    stats.num_reads_kmer++;
+  if (do_adapter) {
+    if (stats.num_reads == next_kmer_read) {
+      next_kmer_read += num_reads_for_kmer;
+      stats.num_reads_kmer++;
+    }
   }
 }
 
@@ -2322,7 +2353,12 @@ struct HTMLFactory {
   void replace_placeholder_with_data (const string &placeholder, 
                                       const string &data);
 
+  void comment_if_skipped (string ph_begin, string ph_end, bool skip);
+  // First thing to do: file details
   void put_file_details (const Config &config);
+
+  // Comment out analyses that were skipped
+  void comment_out (const Config &config);
 
   // Functions to replace pass warn fail
   void put_pass_warn_fail (const FastqStats &stats,
@@ -2332,24 +2368,31 @@ struct HTMLFactory {
   void make_basic_statistics(const FastqStats &stats,
                              Config &config);
 
-  void make_position_quality_data(const FastqStats &stats);
+  void make_position_quality_data(const FastqStats &stats, 
+                                  const Config &config);
 
-  void make_tile_quality_data(const FastqStats &stats);
+  void make_tile_quality_data(const FastqStats &stats,
+                              const Config &config);
 
-  void make_sequence_quality_data(const FastqStats &stats);
+  void make_sequence_quality_data(const FastqStats &stats,
+                                  const Config &config);
+  void make_base_sequence_content_data(const FastqStats &stats,
+                                       const Config &config);
 
-  void make_base_sequence_content_data(const FastqStats &stats);
+  void make_sequence_gc_content_data(const FastqStats &stats,
+                                     const Config &config);
 
-  void make_sequence_gc_content_data(const FastqStats &stats);
+  void make_base_n_content_data(const FastqStats &stats,
+                                const Config &config);
 
-  void make_base_n_content_data(const FastqStats &stats);
+  void make_sequence_length_data(const FastqStats &stats,
+                                 const Config &config);
 
-  void make_sequence_length_data(const FastqStats &stats);
-
-  void make_sequence_duplication_data(const FastqStats &stats);
+  void make_sequence_duplication_data(const FastqStats &stats,
+                                      const Config &config);
 
   void make_overrepresented_sequences_data(const FastqStats &stats,
-                                           Config &config);
+                                           const Config &config);
 
   void make_adapter_content_data(FastqStats &stats,
                                  Config &config);
@@ -2365,6 +2408,80 @@ HTMLFactory::HTMLFactory (string filepath) {
   // pass the whole source code to a string
   while (getline(in, line))
     sourcecode += line + "\n";
+}
+
+void
+HTMLFactory::replace_placeholder_with_data (const string &placeholder, 
+                                            const string &data) {
+  auto pos = sourcecode.find(placeholder);
+
+  // Placeholder not found
+  if (pos == string::npos)
+    throw runtime_error ("placeholder not found: " + placeholder);
+
+  // at least one placeholder found
+  while (pos != string::npos) {
+    sourcecode.replace(pos, placeholder.size(), data);
+    pos = sourcecode.find(placeholder, pos + 1);
+  }
+}
+
+// Comments out html pieces if analyses were skipped
+void
+HTMLFactory::comment_if_skipped (string ph_begin,
+                                 string ph_end,
+                                 bool done) {
+  // put html comments if analysis was skipped
+  if (!done) {
+    replace_placeholder_with_data(ph_begin, "<!--");
+    replace_placeholder_with_data(ph_end, "-->");
+  }
+  else {
+    replace_placeholder_with_data(ph_begin, "");
+    replace_placeholder_with_data(ph_end, "");
+  }
+}
+
+void
+HTMLFactory::comment_out (const Config &config) {
+  comment_if_skipped ("{{skipbasesequence_s}}",
+                      "{{skipbasesequence_e}}",
+                      config.do_quality_base);
+  comment_if_skipped ("{{skiptile_s}}",
+                      "{{skiptile_e}}",
+                      config.do_tile);
+
+  comment_if_skipped ("{{skipsequencequal_s}}",
+                      "{{skipsequencequal_e}}",
+                      config.do_quality_sequence);
+
+  comment_if_skipped ("{{skipbasecontent_s}}",
+                      "{{skipbasecontent_e}}",
+                      config.do_sequence);
+
+  comment_if_skipped ("{{skipsequencegc_s}}",
+                      "{{skipsequencegc_e}}",
+                      config.do_gc_sequence);
+
+  comment_if_skipped ("{{skipbasencontent_s}}",
+                      "{{skipbasencontent_e}}",
+                      config.do_n_content);
+
+  comment_if_skipped ("{{skipseqlength_s}}",
+                      "{{skipseqlength_e}}",
+                      config.do_n_content);
+
+  comment_if_skipped ("{{skipseqdup_s}}",
+                      "{{skipseqdup_e}}",
+                      config.do_duplication);
+
+  comment_if_skipped ("{{skipoverrep_s}}",
+                      "{{skipoverrep_e}}",
+                      config.do_overrepresented);
+
+  comment_if_skipped ("{{skipadapter_s}}",
+                      "{{skipadapter_e}}",
+                      config.do_adapter);
 }
 
 void
@@ -2405,23 +2522,6 @@ HTMLFactory::put_pass_warn_fail (const FastqStats &stats,
   replace_placeholder_with_data ("{{passadapter}}", 
                                  stats.pass_adapter_content);
 }
-
-void
-HTMLFactory::replace_placeholder_with_data (const string &placeholder, 
-                                            const string &data) {
-  auto pos = sourcecode.find(placeholder);
-
-  // Placeholder not found
-  if (pos == string::npos)
-    throw runtime_error ("placeholder not found: " + placeholder);
-
-  // at least one placeholder found
-  while (pos != string::npos) {
-    sourcecode.replace(pos, placeholder.size(), data);
-    pos = sourcecode.find(placeholder, pos + 1);
-  }
-}
-
 void 
 HTMLFactory::make_basic_statistics(const FastqStats &stats,
                                    Config &config) {
@@ -2446,139 +2546,256 @@ HTMLFactory::make_basic_statistics(const FastqStats &stats,
 }
 
 void 
-HTMLFactory::make_position_quality_data (const FastqStats &stats) {
+HTMLFactory::make_position_quality_data (const FastqStats &stats,
+                                         const Config &config) {
   ostringstream data;
   const string placeholder = "{{SEQBASEQUALITYDATA}}";
+  if (config.do_quality_base) {
+    size_t cur_median;
+    for (size_t i = 0; i < stats.max_read_length; ++i) {
+      data << "{y : [";
 
-  size_t cur_median;
-  for (size_t i = 0; i < stats.max_read_length; ++i) {
-    data << "{y : [";
+     if (i < stats.kNumBases) {
+       cur_median = stats.median[i];
+       data << stats.ldecile[i] << ", "
+            << stats.lquartile[i] << ", "
+            << stats.median[i] << ", "
+            << stats.uquartile[i] << ", "
+            << stats.udecile[i] << "], ";
+     } else {
+       cur_median = stats.long_median[i - stats.kNumBases];
+       data << stats.long_ldecile[i - stats.kNumBases] << ", "
+            << stats.long_lquartile[i - stats.kNumBases] << ", "
+            << stats.long_median[i - stats.kNumBases] << ", "
+            << stats.long_uquartile[i - stats.kNumBases] << ", "
+            << stats.long_udecile[i - stats.kNumBases] << "], ";
+     }
+     data << "type : 'box', name : ' " << i << "', ";
+     data << "marker : {color : '";
+     if(cur_median > 30)
+       data << "green";
+     else if (cur_median > 20)
+       data << "yellow";
+     else
+       data << "red";
+     data << "'}}";
+     if (i < stats.max_read_length - 1)
+       data << ", ";
 
-   if (i < stats.kNumBases) {
-     cur_median = stats.median[i];
-     data << stats.ldecile[i] << ", "
-          << stats.lquartile[i] << ", "
-          << stats.median[i] << ", "
-          << stats.uquartile[i] << ", "
-          << stats.udecile[i] << "], ";
-   } else {
-     cur_median = stats.long_median[i - stats.kNumBases];
-     data << stats.long_ldecile[i - stats.kNumBases] << ", "
-          << stats.long_lquartile[i - stats.kNumBases] << ", "
-          << stats.long_median[i - stats.kNumBases] << ", "
-          << stats.long_uquartile[i - stats.kNumBases] << ", "
-          << stats.long_udecile[i - stats.kNumBases] << "], ";
-   }
-   data << "type : 'box', name : ' " << i << "', ";
-   data << "marker : {color : '";
-   if(cur_median > 30)
-     data << "green";
-   else if (cur_median > 20)
-     data << "yellow";
-   else
-     data << "red";
-   data << "'}}";
-   if (i < stats.max_read_length - 1)
-     data << ", ";
-
+    }
   }
   replace_placeholder_with_data (placeholder, data.str());
 }
 
 void
-HTMLFactory::make_tile_quality_data (const FastqStats &stats) {
+HTMLFactory::make_tile_quality_data (const FastqStats &stats,
+                                     const Config &config) {
   ostringstream data;
   const string placeholder = "{{TILEQUALITYDATA}}";
-  // X: position
-  data << "{x : [";
-  for (size_t i = 0; i < stats.max_read_length; ++i) {
-    data << i+1;
-    if (i < stats.max_read_length - 1)
-      data << ",";
-  }
 
-  // Y : Tile
-  data << "], y: [";
-  bool first_seen = false;
-  for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
-    if(stats.tile_count[i] > 0) {
-      if(!first_seen)
-        first_seen = true;
-      else 
+  if (config.do_tile) {
+    // X: position
+    data << "{x : [";
+    for (size_t i = 0; i < stats.max_read_length; ++i) {
+      data << i+1;
+      if (i < stats.max_read_length - 1)
         data << ",";
-      data << i;
     }
-  }
 
-  // Z: quality z score
-  data << "], z: [";
-  first_seen = false;
-  for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
-    if(stats.tile_count[i] > 0) {
-      if(!first_seen)
-        first_seen = true;
-      else 
-        data << ", ";
-
-      // datart new array with all counts
-      data << "[";
-      for (size_t j = 0; j < stats.max_read_length; ++j) {
-        if (j < stats.kNumBases)
-          data << stats.tile_position_quality[(j << stats.kBitShiftTile) | i];
-        else
-          data << stats.long_tile_position_quality[
-            ((j - stats.kNumBases) << stats.kBitShiftTile) | i];
-
-        if (j < stats.max_read_length - 1)
+    // Y : Tile
+    data << "], y: [";
+    bool first_seen = false;
+    for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
+      if(stats.tile_count[i] > 0) {
+        if(!first_seen)
+          first_seen = true;
+        else 
           data << ",";
+        data << i;
       }
-      data << "]";
     }
+
+    // Z: quality z score
+    data << "], z: [";
+    first_seen = false;
+    for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
+      if(stats.tile_count[i] > 0) {
+        if(!first_seen)
+          first_seen = true;
+        else 
+          data << ", ";
+
+        // datart new array with all counts
+        data << "[";
+        for (size_t j = 0; j < stats.max_read_length; ++j) {
+          if (j < stats.kNumBases)
+            data << stats.tile_position_quality[(j << stats.kBitShiftTile) | i];
+          else
+            data << stats.long_tile_position_quality[
+              ((j - stats.kNumBases) << stats.kBitShiftTile) | i];
+
+          if (j < stats.max_read_length - 1)
+            data << ",";
+        }
+        data << "]";
+      }
+    }
+    data << "]";
+    data << ", type : 'heatmap' }";
   }
-  data << "]";
-  data << ", type : 'heatmap' }";
   replace_placeholder_with_data (placeholder, data.str());
 }
 
 void 
-HTMLFactory::make_sequence_quality_data (const FastqStats &stats) {
+HTMLFactory::make_sequence_quality_data (const FastqStats &stats,
+                                         const Config &config) {
   ostringstream data;
   const string placeholder = "{{SEQQUALITYDATA}}";
 
-  // X values : avg quality phred scores
-  data << "{x : [";
-  for (size_t i = 0; i < 41; ++i) {
-    data << i + stats.kBaseQuality;
-   if (i < 40)
-     data << ", ";
-  }
+  if (config.do_quality_sequence) {
+    // X values : avg quality phred scores
+    data << "{x : [";
+    for (size_t i = 0; i < 41; ++i) {
+      data << i + stats.kBaseQuality;
+     if (i < 40)
+       data << ", ";
+    }
 
-  // Y values: frequency with which they were seen
-  data << "], y : [";
-  for (size_t i = 0; i < 41; ++i) {
-    data << stats.quality_count[i];
-   if (i < 40)
-     data << ", ";
+    // Y values: frequency with which they were seen
+    data << "], y : [";
+    for (size_t i = 0; i < 41; ++i) {
+      data << stats.quality_count[i];
+     if (i < 40)
+       data << ", ";
+    }
+    data << "], type: 'line', line : {color : 'red'}, "
+         << "name : 'Sequence quality distribution'}";
   }
-  data << "], type: 'line', line : {color : 'red'}, "
-       << "name : 'Sequence quality distribution'}";
-
   replace_placeholder_with_data (placeholder, data.str());
 }
 
 void 
-HTMLFactory::make_base_sequence_content_data (const FastqStats &stats) {
+HTMLFactory::make_base_sequence_content_data (const FastqStats &stats,
+                                              const Config &config) {
   ostringstream data;
   const string placeholder = "{{BASESEQCONTENTDATA}}";
-  // ATGC
-  for (size_t base = 0; base < stats.kNumNucleotides; ++base){
-    // start line
-    data << "{";
 
-    // X values : base position
-    data << "x : [";
+  if (config.do_sequence) {
+    // ATGC
+    for (size_t base = 0; base < stats.kNumNucleotides; ++base){
+      // start line
+      data << "{";
+
+      // X values : base position
+      data << "x : [";
+      for (size_t i = 0; i < stats.max_read_length; ++i) {
+        data << i+1;
+        if (i < stats.max_read_length - 1)
+          data << ", ";
+      }
+
+      // Y values: frequency with which they were seen
+      data << "], y : [";
+      for (size_t i = 0; i < stats.max_read_length; ++i) {
+        if (base == 0) {
+          if (i < stats.kNumBases) data << stats.a_pct[i];
+          else data << stats.long_a_pct[i - stats.kNumBases];
+        }
+        if (base == 1) {
+          if (i < stats.kNumBases) data << stats.c_pct[i];
+          else data << stats.long_c_pct[i - stats.kNumBases];
+        }
+        if (base == 2) {
+          if (i < stats.kNumBases) data << stats.t_pct[i];
+          else data << stats.long_t_pct[i - stats.kNumBases];
+        }
+        if (base == 3) {
+          if (i < stats.kNumBases) data << stats.g_pct[i];
+          else data << stats.long_g_pct[i - stats.kNumBases];
+        }
+        if (i < stats.max_read_length - 1)
+          data << ", ";
+      }
+      data << "], mode : 'lines', name : '" + size_t_to_seq (base, 1) + "', ";
+
+      // color
+      data << "line :{ color : '";
+      if(base == 0) 
+        data << "green";
+      else if (base == 1)
+        data << "blue";
+      else if (base == 2)
+        data << "red";
+      else 
+        data << "black";
+      data << "'}";
+      // end color
+
+      // end line
+      data << "}";
+      if (base < stats.kNumNucleotides - 1)
+        data << ", ";
+    }
+  }
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+void 
+HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats,
+                                            const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{SEQGCCONTENTDATA}}";
+
+  if (config.do_gc_sequence) {
+    // Actual count
+    data << "{x : [";
+    for (size_t i = 0; i < 101; ++i) {
+      data << i + 1;
+      if (i < 101)
+        data << ", ";
+    }
+
+    // Y values: frequency with which they were seen
+    data << "], y : [";
+    for (size_t i = 0; i < 101; ++i) {
+      data << stats.gc_count[i];
+     if (i < 101)
+       data << ", ";
+    }
+    data << "], type: 'line', line : {color : 'red'}, name : 'GC distribution'}";
+
+    // Theoretical count
+    data << ", {x : [";
+    for (size_t i = 0; i < 101; ++i) {
+      data << i + 1;
+      if (i < 101)
+        data << ", ";
+    }
+
+    // Y values: frequency with which they were seen
+    data << "], y : [";
+    for (size_t i = 0; i < 101; ++i) {
+      data << stats.theoretical_gc_count[i];
+     if (i < 101)
+       data << ", ";
+    }
+    data << "], type: 'line', line : {color : 'blue'},"
+         << "name : 'Theoretical distribution'}";
+  }
+  replace_placeholder_with_data (placeholder, data.str());
+}
+
+void 
+HTMLFactory::make_base_n_content_data (const FastqStats &stats,
+                                       const Config &config) {
+  ostringstream data;
+  const string placeholder = "{{BASENCONTENTDATA}}";
+
+  if (config.do_n_content) {
+    // base position
+    data << "{x : [";
     for (size_t i = 0; i < stats.max_read_length; ++i) {
-      data << i+1;
+      data << i + 1;
       if (i < stats.max_read_length - 1)
         data << ", ";
     }
@@ -2586,261 +2803,167 @@ HTMLFactory::make_base_sequence_content_data (const FastqStats &stats) {
     // Y values: frequency with which they were seen
     data << "], y : [";
     for (size_t i = 0; i < stats.max_read_length; ++i) {
-      if (base == 0) {
-        if (i < stats.kNumBases) data << stats.a_pct[i];
-        else data << stats.long_a_pct[i - stats.kNumBases];
-      }
-      if (base == 1) {
-        if (i < stats.kNumBases) data << stats.c_pct[i];
-        else data << stats.long_c_pct[i - stats.kNumBases];
-      }
-      if (base == 2) {
-        if (i < stats.kNumBases) data << stats.t_pct[i];
-        else data << stats.long_t_pct[i - stats.kNumBases];
-      }
-      if (base == 3) {
-        if (i < stats.kNumBases) data << stats.g_pct[i];
-        else data << stats.long_g_pct[i - stats.kNumBases];
-      }
+      if (i < stats.kNumBases)
+        data << stats.n_pct[i];
+      else
+        data << stats.long_n_pct[i - stats.kNumBases];
+
       if (i < stats.max_read_length - 1)
         data << ", ";
     }
-    data << "], mode : 'lines', name : '" + size_t_to_seq (base, 1) + "', ";
-
-    // color
-    data << "line :{ color : '";
-    if(base == 0) 
-      data << "green";
-    else if (base == 1)
-      data << "blue";
-    else if (base == 2)
-      data << "red";
-    else 
-      data << "black";
-    data << "'}";
-    // end color
-    
-    // end line
-    data << "}";
-    if (base < stats.kNumNucleotides - 1)
-      data << ", ";
+    data << "], type: 'line', line : {color : 'red'}, "
+         << "name : 'Fraction of N reads per base'}";
   }
   replace_placeholder_with_data (placeholder, data.str());
 }
 
 void 
-HTMLFactory::make_sequence_gc_content_data (const FastqStats &stats) {
-  ostringstream data;
-  const string placeholder = "{{SEQGCCONTENTDATA}}";
-
-  // Actual count
-  data << "{x : [";
-  for (size_t i = 0; i < 101; ++i) {
-    data << i + 1;
-    if (i < 101)
-      data << ", ";
-  }
-
-  // Y values: frequency with which they were seen
-  data << "], y : [";
-  for (size_t i = 0; i < 101; ++i) {
-    data << stats.gc_count[i];
-   if (i < 101)
-     data << ", ";
-  }
-  data << "], type: 'line', line : {color : 'red'}, name : 'GC distribution'}";
-
-  // Theoretical count
-  data << ", {x : [";
-  for (size_t i = 0; i < 101; ++i) {
-    data << i + 1;
-    if (i < 101)
-      data << ", ";
-  }
-
-  // Y values: frequency with which they were seen
-  data << "], y : [";
-  for (size_t i = 0; i < 101; ++i) {
-    data << stats.theoretical_gc_count[i];
-   if (i < 101)
-     data << ", ";
-  }
-  data << "], type: 'line', line : {color : 'blue'},"
-       << "name : 'Theoretical distribution'}";
-
-  replace_placeholder_with_data (placeholder, data.str());
-}
-
-void 
-HTMLFactory::make_base_n_content_data (const FastqStats &stats) {
-  ostringstream data;
-  const string placeholder = "{{BASENCONTENTDATA}}";
-
-  // base position
-  data << "{x : [";
-  for (size_t i = 0; i < stats.max_read_length; ++i) {
-    data << i + 1;
-    if (i < stats.max_read_length - 1)
-      data << ", ";
-  }
-
-  // Y values: frequency with which they were seen
-  data << "], y : [";
-  for (size_t i = 0; i < stats.max_read_length; ++i) {
-    if (i < stats.kNumBases)
-      data << stats.n_pct[i];
-    else
-      data << stats.long_n_pct[i - stats.kNumBases];
-
-    if (i < stats.max_read_length - 1)
-      data << ", ";
-  }
-  data << "], type: 'line', line : {color : 'red'}, "
-       << "name : 'Fraction of N reads per base'}";
-  replace_placeholder_with_data (placeholder, data.str());
-}
-
-void 
-HTMLFactory::make_sequence_length_data (const FastqStats &stats) {
+HTMLFactory::make_sequence_length_data (const FastqStats &stats,
+                                        const Config &config) {
   ostringstream data;
   const string placeholder = "{{SEQLENDATA}}";
 
-  // X values : avg quality phred scores
-  data << "{x : [";
-  bool first_seen = false;
-  size_t val;
-  for (size_t i = 0; i < stats.max_read_length; ++i) {
-    val = 0 ;
-    if (i < stats.kNumBases){
-      if (stats.read_length_freq[i] > 0)
-        val = stats.read_length_freq[i];
-    } else {
-      if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
-        val = stats.long_read_length_freq[i - stats.kNumBases];
+  if (config.do_sequence_length) {
+    // X values : avg quality phred scores
+    data << "{x : [";
+    bool first_seen = false;
+    size_t val;
+    for (size_t i = 0; i < stats.max_read_length; ++i) {
+      val = 0 ;
+      if (i < stats.kNumBases){
+        if (stats.read_length_freq[i] > 0)
+          val = stats.read_length_freq[i];
+      } else {
+        if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
+          val = stats.long_read_length_freq[i - stats.kNumBases];
+      }
+
+      if (val > 0) {
+        if (first_seen)
+          data << ",";
+        data << "\"" << i+1 << " bp\"";
+        first_seen = true;
+      }
     }
 
-    if (val > 0) {
-      if (first_seen)
-        data << ",";
-      data << "\"" << i+1 << " bp\"";
-      first_seen = true;
+    // Y values: frequency with which they were seen
+    data << "], y : [";
+    first_seen = false;
+    for (size_t i = 0; i < stats.max_read_length; ++i) {
+      val = 0;
+      if (i < stats.kNumBases){
+        if (stats.read_length_freq[i] > 0)
+          val = stats.read_length_freq[i];
+      } else {
+        if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
+          val = stats.long_read_length_freq[i - stats.kNumBases];
+      }
+
+      if (val > 0) {
+        if (first_seen)
+          data << ",";
+        data << val;
+        first_seen = true;
+      }
     }
+
+    // Put the sequence value in the text
+    data << "], text : [";
+    first_seen = false;
+    for (size_t i = 0; i < stats.max_read_length; ++i) {
+      val = 0;
+      if (i < stats.kNumBases){
+
+        if (stats.read_length_freq[i] > 0)
+          val = stats.read_length_freq[i];
+      } else {
+        if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
+          val = stats.long_read_length_freq[i - stats.kNumBases];
+      }
+
+      if (val > 0) {
+        if (first_seen)
+          data << ",";
+        data << i+1;
+        first_seen = true;
+      }
+    }
+
+
+    data << "], type: 'bar', marker : {color : 'rgba(55,128,191,1.0)', line : {width : 2}}, "
+         << "name : 'Sequence length distribution'}";
   }
-
-  // Y values: frequency with which they were seen
-  data << "], y : [";
-  first_seen = false;
-  for (size_t i = 0; i < stats.max_read_length; ++i) {
-    val = 0;
-    if (i < stats.kNumBases){
-      if (stats.read_length_freq[i] > 0)
-        val = stats.read_length_freq[i];
-    } else {
-      if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
-        val = stats.long_read_length_freq[i - stats.kNumBases];
-    }
-
-    if (val > 0) {
-      if (first_seen)
-        data << ",";
-      data << val;
-      first_seen = true;
-    }
-  }
-
-  // Put the sequence value in the text
-  data << "], text : [";
-  first_seen = false;
-  for (size_t i = 0; i < stats.max_read_length; ++i) {
-    val = 0;
-    if (i < stats.kNumBases){
-
-      if (stats.read_length_freq[i] > 0)
-        val = stats.read_length_freq[i];
-    } else {
-      if (stats.long_read_length_freq[i - stats.kNumBases] > 0)
-        val = stats.long_read_length_freq[i - stats.kNumBases];
-    }
-
-    if (val > 0) {
-      if (first_seen)
-        data << ",";
-      data << i+1;
-      first_seen = true;
-    }
-  }
-
-
-  data << "], type: 'bar', marker : {color : 'rgba(55,128,191,1.0)', line : {width : 2}}, "
-       << "name : 'Sequence length distribution'}";
-
   replace_placeholder_with_data (placeholder, data.str());
 }
 
 
 void 
-HTMLFactory::make_sequence_duplication_data (const FastqStats &stats) {
+HTMLFactory::make_sequence_duplication_data (const FastqStats &stats,
+                                             const Config &config) {
   ostringstream data;
   const string placeholder = "{{SEQDUPDATA}}";
 
-  // non-deduplicated
-  data << "{x : [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]";
+  if (config.do_duplication) {
+    // non-deduplicated
+    data << "{x : [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]";
 
-  // total percentage in each bin
-  data << ", y : [";
-  for (size_t i = 0; i < 16; ++i) {
-    data << stats.percentage_total[i];
+    // total percentage in each bin
+    data << ", y : [";
+    for (size_t i = 0; i < 16; ++i) {
+      data << stats.percentage_total[i];
 
-    if (i < 15)
-      data << ", ";
+      if (i < 15)
+        data << ", ";
+    }
+    data << "], type: 'line', line : {color : 'blue'}, "
+         << "name : 'total sequences'}";
+
+    // deduplicated
+    data << ", {x : [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]";
+
+
+    // total percentage in deduplicated
+    data << ", y : [";
+    for (size_t i = 0; i < 16; ++i) {
+      data << stats.percentage_deduplicated[i];
+
+      if (i < 15)
+        data << ", ";
+    }
+    data << "], type: 'line', line : {color : 'red'}, "
+         << "name : 'total sequences'}";
   }
-  data << "], type: 'line', line : {color : 'blue'}, "
-       << "name : 'total sequences'}";
-
-  // deduplicated
-  data << ", {x : [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]";
-
-
-  // total percentage in deduplicated
-  data << ", y : [";
-  for (size_t i = 0; i < 16; ++i) {
-    data << stats.percentage_deduplicated[i];
-
-    if (i < 15)
-      data << ", ";
-  }
-  data << "], type: 'line', line : {color : 'red'}, "
-       << "name : 'total sequences'}";
   replace_placeholder_with_data (placeholder, data.str());
 }
 
 
 void 
 HTMLFactory::make_overrepresented_sequences_data(const FastqStats &stats,
-                                                 Config &config) {
+                                                 const Config &config) {
   string placeholder = "{{OVERREPSEQDATA}}";
   ostringstream data;
 
-  // Header
-  data << "<table><thead><tr>";
-  data << "<th>Sequence</th>";
-  data << "<th>Count</th>";
-  data << "<th>Percentage</th>";
-  data << "<th>Possible Source</th>";
-  data << "</tr></thead><tbody>";
+  if (config.do_overrepresented) {
+    // Header
+    data << "<table><thead><tr>";
+    data << "<th>Sequence</th>";
+    data << "<th>Count</th>";
+    data << "<th>Percentage</th>";
+    data << "<th>Possible Source</th>";
+    data << "</tr></thead><tbody>";
 
-  // All overrep sequences
-  for (auto v : stats.overrep_sequences) {
-    data << "<tr><td>" << v.first << "</td>";
-    data << "<td>" << v.second << "</td>";
-    data << "<td>" << 100.0 * v.second / stats.num_reads << "</td>";
-    data << "<td>" << config.get_matching_contaminant(v.first)
-        << "</td>";
+    // All overrep sequences
+    for (auto v : stats.overrep_sequences) {
+      data << "<tr><td>" << v.first << "</td>";
+      data << "<td>" << v.second << "</td>";
+      data << "<td>" << 100.0 * v.second / stats.num_reads << "</td>";
+      data << "<td>" << config.get_matching_contaminant(v.first)
+          << "</td>";
 
-    data << "</tr>";
+      data << "</tr>";
+    }
+    data << "</tbody></table>";
   }
-  data << "</tbody></table>";
-
   replace_placeholder_with_data (placeholder, data.str());
 }
 
@@ -2850,43 +2973,45 @@ HTMLFactory::make_adapter_content_data (FastqStats &stats,
   string placeholder = "{{ADAPTERDATA}}";
   ostringstream data;
 
-  // Number of bases to make adapter content
-  size_t num_bases =  min(stats.kNumBases, stats.kKmerMaxBases);
-  bool seen_first = false;
+  if (config.do_adapter) {
+    // Number of bases to make adapter content
+    size_t num_bases =  min(stats.kNumBases, stats.kKmerMaxBases);
+    bool seen_first = false;
 
-  size_t jj = 0;
-  for (auto v : config.adapters) {
-    if (!seen_first)
-      seen_first = true;
-    else
-      data << ",";
-    data << "{";
+    size_t jj = 0;
+    for (auto v : config.adapters) {
+      if (!seen_first)
+        seen_first = true;
+      else
+        data << ",";
+      data << "{";
 
-    // X values : read position
-    data << "x : [";
-    for (size_t i = 0; i < num_bases; ++i) {
-      if (stats.cumulative_read_length_freq[i] > 0){
-        data << i+1;
-        if (i < num_bases - 1)
-          data << ",";
+      // X values : read position
+      data << "x : [";
+      for (size_t i = 0; i < num_bases; ++i) {
+        if (stats.cumulative_read_length_freq[i] > 0){
+          data << i+1;
+          if (i < num_bases - 1)
+            data << ",";
+        }
       }
-    }
-    data << "]";
+      data << "]";
 
-    // Y values : cumulative adapter frequency
-    data << ", y : [";
-    for (size_t i = 0; i < num_bases; ++i) {
-      if (stats.cumulative_read_length_freq[i] > 0){
-        data << stats.kmer_by_base[i][jj];
-        if (i < num_bases - 1)
-          data << ",";
+      // Y values : cumulative adapter frequency
+      data << ", y : [";
+      for (size_t i = 0; i < num_bases; ++i) {
+        if (stats.cumulative_read_length_freq[i] > 0){
+          data << stats.kmer_by_base[i][jj];
+          if (i < num_bases - 1)
+            data << ",";
+        }
       }
-    }
 
-    data << "]";
-    data << ", type : 'line', ";
-    data << "name : '" << v.first << "'}";
-    ++jj;
+      data << "]";
+      data << ", type : 'line', ";
+      data << "name : '" << v.first << "'}";
+      ++jj;
+    }
   }
   replace_placeholder_with_data (placeholder, data.str());
 }
@@ -2920,7 +3045,7 @@ read_stream_into_stats(T &in,
   // if I could not get tile information from read names, I need to tell this to
   // config so it does not output tile data later:
   if (in.tile_ignore)
-    config.limits["tile"]["ignore"] = 1.0;
+    config.do_tile = false;
 }
 
 int main(int argc, const char **argv) {
@@ -3089,16 +3214,17 @@ int main(int argc, const char **argv) {
     log_process("Making html.");
   HTMLFactory factory ("Configuration/template.html");
   factory.put_file_details(config);
+  factory.comment_out(config);
   factory.put_pass_warn_fail (stats, config);
   factory.make_basic_statistics (stats, config);
-  factory.make_position_quality_data (stats);
-  factory.make_tile_quality_data (stats);
-  factory.make_sequence_quality_data (stats);
-  factory.make_base_sequence_content_data (stats);
-  factory.make_sequence_gc_content_data (stats);
-  factory.make_base_n_content_data (stats);
-  factory.make_sequence_length_data (stats);
-  factory.make_sequence_duplication_data (stats);
+  factory.make_position_quality_data (stats, config);
+  factory.make_tile_quality_data (stats, config);
+  factory.make_sequence_quality_data (stats, config);
+  factory.make_base_sequence_content_data (stats, config);
+  factory.make_sequence_gc_content_data (stats, config);
+  factory.make_base_n_content_data (stats, config);
+  factory.make_sequence_length_data (stats, config);
+  factory.make_sequence_duplication_data (stats, config);
   factory.make_overrepresented_sequences_data (stats, config);
   factory.make_adapter_content_data (stats, config);
   ofstream html (config.outfile + ".html");
