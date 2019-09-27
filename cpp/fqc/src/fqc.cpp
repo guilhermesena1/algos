@@ -818,7 +818,7 @@ FastqStats::summarize(Config &config) {
       cumulative_sum += read_length_freq[i];
       if (read_length_freq[i] > 0)
         if (min_read_length == 0)
-          min_read_length = i;
+          min_read_length = i + 1;
     }
     else
       cumulative_sum += long_read_length_freq[i - kNumBases];
@@ -1237,7 +1237,6 @@ FastqStats::write(ostream &os, const Config &config) {
   os << ">>Basic Statistics\t" << pass_basic_statistics << "\n";
   os << "#Measure\tValue\n";
   os << "Filename\t" << strip_path (config.filename) << "\n";
-  os << "File type\tConventional base calls\n";
   os << "Total Sequences\t" << num_reads << "\n";
   os << "Sequences flagged as poor quality \t" << num_poor << "\n";
   os << "%GC \t" << avg_gc << "\n";
@@ -2177,11 +2176,8 @@ SamReader::load() {
 
   // Skip sam header
   while (*cur_char == '@') {
-    for(; *cur_char != '\n';) {
-      read_fast_forward_line();
-      skip_separator();
-    }
-    ++cur_char; // skip newline
+    for(; *cur_char != line_separator; ++cur_char);
+    ++cur_char;
   }
 }
 
@@ -2209,7 +2205,6 @@ SamReader::operator >> (FastqStats &stats) {
 
   // skip \n
   ++cur_char;
-  cerr << buffer << "\n";
   postprocess_fastq_record(stats);
   stats.num_reads++;
 
@@ -2288,7 +2283,6 @@ BamReader::operator >> (FastqStats &stats) {
       read_sequence_line(stats);
       read_quality_line(stats);
       postprocess_fastq_record(stats);
-      cerr << buffer << "\n";
       stats.num_reads++;
       return true;
     } else {
@@ -2436,9 +2430,6 @@ HTMLFactory::make_basic_statistics(const FastqStats &stats,
   data << "<table><thead><tr><th>Measure</th><th>Value</th></tr></thead><tbody>";
   data << "<tr><td>Filename</td><td>" << strip_path(config.filename)
        << "</td></tr>";
-  data << "<tr><td>Filetype</td><td>" << "Conventional base calls" 
-       << "</td></tr>";
-  data << "<tr><td>Encoding</td><td>" << "Sanger / Illumina 1.9" << "</td></tr>";
   data << "<tr><td>Total Sequences</td><td>" << stats.num_reads << "</td></tr>";
   data << "<tr><td>Sequences Flagged As Poor Quality</td><td>" 
        << stats.num_poor << "</td></tr>";
