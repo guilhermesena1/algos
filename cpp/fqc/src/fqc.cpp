@@ -561,7 +561,6 @@ struct FastqStats {
   static const size_t kNumNucleotides = 4;  // A = 00,C = 01,T = 10,G = 11
 
   // maximum tile value
-  static const size_t kNumMaxTiles = 2048;
   static const size_t kMinTileNumber = 10000;
 
   // Maximum number of bases for which to do kmer statistics
@@ -582,7 +581,6 @@ struct FastqStats {
 
   // Bit shifts as instructions for the arrays
   static const size_t kBitShiftNucleotide = log2exact(kNumNucleotides);
-  static const size_t kBitShiftTile = log2exact(kNumMaxTiles);
   static const size_t kBitShiftQuality = log2exact(kNumQualityValues);
   static const size_t kBitShiftKmer = 2 * kmer_size; // two bits per base
 
@@ -598,7 +596,6 @@ struct FastqStats {
   size_t avg_read_length;  // average of all read lengths
   size_t num_reads;  // total number of lines read
   size_t num_reads_kmer; // number of reads in which kmer counts was performed
-  size_t num_reads_tile; // number of reads in which tile count was performed
   size_t min_read_length; // minimum read length seen
   size_t max_read_length;  // total number of lines read
   size_t num_poor;  // reads whose average quality was <= poor
@@ -637,8 +634,9 @@ struct FastqStats {
   array<size_t, kNumBases> cumulative_read_length_freq;
 
   /*********** PER TILE SEQUENCE QUALITY OVERSERQUENCES ********/
-  array <double, kNumMaxTiles * kNumBases> tile_position_quality;
-  array <size_t, kNumMaxTiles> tile_count;
+  unordered_map <size_t, vector<double> > tile_position_quality;
+  unordered_map <size_t, vector<size_t> > tile_position_count;
+  unordered_map <size_t, size_t> tile_count;
 
   /*********** SUMMARY ARRAYS **************/
   // Quantiles for the position_quality_count
@@ -664,7 +662,6 @@ struct FastqStats {
   vector<size_t> long_position_quality_count;
   vector<size_t> long_read_length_freq;
   vector<size_t> long_cumulative_read_length_freq;
-  vector<double> long_tile_position_quality;
   vector<size_t> long_ldecile, long_lquartile, long_median,
                  long_uquartile,long_udecile;
   vector<double> long_mean;
@@ -737,7 +734,6 @@ FastqStats::FastqStats() {
   avg_gc = 0;
   num_reads = 0;
   num_reads_kmer = 0;
-  num_reads_tile = 0;
   min_read_length = 0;
   max_read_length = 0;
   num_poor = 0;
@@ -752,8 +748,6 @@ FastqStats::FastqStats() {
   quality_count.fill(0);
   gc_count.fill(0);
   position_quality_count.fill(0);
-  tile_position_quality.fill(0);
-  tile_count.fill(0);
 
   // Defines k-mer mask, length and allocates vector
   kmer_mask = (1ll << (2*kmer_size)) - 1;
@@ -778,8 +772,10 @@ FastqStats::allocate_new_base(const bool ignore_tile) {
   // space for tile quality in each position. This takes A LOT of memory so 
   // if tiles are not being considered we will just ignore this
   if(!ignore_tile) {
-    for (size_t i = 0; i < kNumMaxTiles; ++i)
-      long_tile_position_quality.push_back(0);
+    for (auto  &v : tile_position_quality)
+      v.second.push_back(0);
+    for (auto  &v : tile_position_count)
+      v.second.push_back(0);
   }
 
   // Successfully allocated space for a new base
@@ -1210,41 +1206,28 @@ FastqStats::summarize(Config &config) {
 
   /************** PER TILE SEQUENCE QUALITY ********************/
   if (config.do_tile) {
+    // First thing is to average all tile qualities in all positions and
+    // subtract the mean for that base position
+    double mean_in_base;
+    for (auto &v : tile_position_quality) {
+      for (size_t i = 0; i < max_read_length; ++i) {
+        if (i < kNumBases) mean_in_base = mean[i];
+        else mean_in_base = long_mean[i - kNumBases];
+        v.second[i] = v.second[i] / tile_position_count[v.first][i]
+                      - mean_in_base;
+      }
+    }
+
+    // Now check the deviation based on the config file
     pass_per_tile_sequence_quality = "pass";
-
-    // Normalize by average: We can reuse the mean we calculated in per base
-    // quality distributions above.
-    size_t tile_ind;
     for(size_t i = 0; i < max_read_length; ++i) {
-      for (size_t j = 0; j < kNumMaxTiles; ++j) {
-        if(tile_count[j] > 0){
-          if (i < kNumBases) {
-            tile_ind = (i << kBitShiftTile) | j;
-            tile_position_quality[tile_ind] =
-            tile_position_quality[tile_ind] / tile_count[j] - mean[i];
+      for (auto &v : tile_position_quality) {
+        if(pass_per_tile_sequence_quality != "fail") {
+          if (v.second[i] <= -config.limits["tile"]["error"])
+            pass_per_tile_sequence_quality = "fail";
 
-            if(pass_per_tile_sequence_quality != "fail") {
-              if (tile_position_quality[tile_ind] <= config.limits["tile"]["error"])
-                pass_per_tile_sequence_quality = "fail";
-
-              else if (tile_position_quality[tile_ind] <= config.limits["tile"]["warn"])
-                pass_per_tile_sequence_quality = "warn";
-            }
-          }
-          else {
-            tile_ind = ((i - kNumBases) << kBitShiftTile) | j;
-            long_tile_position_quality[tile_ind] =
-            (long_tile_position_quality[tile_ind] / tile_count[j]) - long_mean[i - kNumBases];
-
-            if(pass_per_tile_sequence_quality != "fail") {
-              if (long_tile_position_quality[tile_ind] <=
-                  -config.limits["tile"]["error"])
-                pass_per_tile_sequence_quality = "fail";
-              else if (long_tile_position_quality[tile_ind] <=
-                  -config.limits["tile"]["warn"])
-                pass_per_tile_sequence_quality = "warn";
-            }
-          }
+          else if (v.second[i] <= -config.limits["tile"]["warn"])
+            pass_per_tile_sequence_quality = "warn";
         }
       }
     }
@@ -1336,25 +1319,21 @@ FastqStats::write(ostream &os, const Config &config) {
   }
 
   // Per tile sequence quality
+  // get tile values and sort
+  vector<size_t> tiles_sorted;
+  for (auto v : tile_count)
+    tiles_sorted.push_back(v.first);
+  sort(tiles_sorted.begin(), tiles_sorted.end());
   if (config.do_tile) {
     os << ">>Per tile sequence quality\t" <<
           pass_per_tile_sequence_quality << "\n";
 
-    size_t tile_ind;
-    for (size_t i = 0; i < kNumMaxTiles; ++i) {
-      if (tile_count[i] > 0) {
-        for (size_t j = 0; j < max_read_length; ++j) {
-          if (j < kNumBases) {
-            tile_ind = (j << kBitShiftTile) | i;
-            os << i + kMinTileNumber << "\t" << j + 1 << "\t" <<
-              tile_position_quality[tile_ind];
-          } else {
-            tile_ind = ((j - kNumBases) << kBitShiftTile) | i;
-            os << i + kMinTileNumber << "\t" << j + 1 << "\t" << 
-              long_tile_position_quality[tile_ind];
-          }
-          os << "\n";
-        }
+    // prints tiles sorted by value
+    for (size_t i = 0; i < tiles_sorted.size(); ++i) {
+      for (size_t j = 0; j < max_read_length; ++j) {
+        os << tiles_sorted[i] << "\t" << j + 1 << "\t"  
+           << tile_position_quality[tiles_sorted[i]][j];
+        os << "\n";
       }
     }
 
@@ -1743,7 +1722,15 @@ StreamReader::read_tile_line(FastqStats &stats){
   }
   else {
     get_tile_value();
-    tile_cur -= stats.kMinTileNumber;
+    // allocate vector for tile if it doesn't exist
+    if (stats.tile_position_quality.count(tile_cur) == 0) {
+      stats.tile_count[tile_cur] = 0;
+      stats.tile_position_quality[tile_cur] = 
+        vector<double> (stats.max_read_length, 0.0);
+      stats.tile_position_count[tile_cur] = 
+        vector<size_t> (stats.max_read_length, 0);
+    }
+
   }
 }
 
@@ -1897,11 +1884,13 @@ StreamReader::process_quality_base_from_buffer(FastqStats &stats) {
         (read_pos << stats.kBitShiftQuality) | quality_value]++;
 
   // Tile processing
-  if (!tile_ignore)
-    if ((stats.num_reads == next_tile_read) && tile_cur > 0) {
-      stats.tile_position_quality[(read_pos << stats.kBitShiftTile) | tile_cur]
+  if (!tile_ignore){
+    if ((stats.num_reads == next_tile_read) && tile_cur != 0) {
+      stats.tile_position_quality[tile_cur][read_pos]
           += quality_value;
+      stats.tile_position_count[tile_cur][read_pos]++;
 
+    }
   }
 }
 
@@ -1914,9 +1903,10 @@ StreamReader::process_quality_base_from_leftover(FastqStats &stats) {
 
   // Tile processing
   if (!tile_ignore) {
-    if ((stats.num_reads == next_tile_read) && tile_cur > 0) {
-      stats.long_tile_position_quality[(leftover_ind << stats.kBitShiftTile) | tile_cur]
+    if ((stats.num_reads == next_tile_read) && tile_cur != 0) {
+      stats.tile_position_quality[tile_cur][leftover_ind + stats.kNumBases]
           += quality_value;
+      stats.tile_position_count[tile_cur][read_pos]++;
     }
   }
 }
@@ -2004,9 +1994,9 @@ StreamReader::postprocess_fastq_record(FastqStats &stats) {
   if (!tile_ignore) {
     if (stats.num_reads == next_tile_read) {
       next_tile_read += num_reads_for_tile;
-      stats.num_reads_tile++;
-      if (tile_cur > 0)
+      if (tile_cur != 0) {
         stats.tile_count[tile_cur]++;
+      }
     }
   }
 
@@ -2385,7 +2375,7 @@ class HTMLFactory {
   void make_position_quality_data(const FastqStats &stats, 
                                   const Config &config);
 
-  void make_tile_quality_data(const FastqStats &stats,
+  void make_tile_quality_data(FastqStats &stats,
                               const Config &config);
 
   void make_sequence_quality_data(const FastqStats &stats,
@@ -2610,12 +2600,18 @@ HTMLFactory::make_position_quality_data (const FastqStats &stats,
 }
 
 void
-HTMLFactory::make_tile_quality_data (const FastqStats &stats,
+HTMLFactory::make_tile_quality_data (FastqStats &stats,
                                      const Config &config) {
   ostringstream data;
   const string placeholder = "{{TILEQUALITYDATA}}";
 
   if (config.do_tile) {
+    // first thing is to get the sorted tile values again
+    vector<size_t> tiles_sorted;
+    for (auto v : stats.tile_count)
+      tiles_sorted.push_back(v.first);
+    sort(tiles_sorted.begin(), tiles_sorted.end());
+
     // X: position
     data << "{x : [";
     for (size_t i = 0; i < stats.max_read_length; ++i) {
@@ -2627,40 +2623,26 @@ HTMLFactory::make_tile_quality_data (const FastqStats &stats,
     // Y : Tile
     data << "], y: [";
     bool first_seen = false;
-    for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
-      if(stats.tile_count[i] > 0) {
-        if(!first_seen)
-          first_seen = true;
-        else
-          data << ",";
-        data << i;
-      }
+    for (size_t i = 0; i < tiles_sorted.size(); ++i) {
+      if(!first_seen) first_seen = true;
+      else data << ",";
+      data << tiles_sorted[i];
     }
 
     // Z: quality z score
     data << "], z: [";
     first_seen = false;
-    for (size_t i = 0; i < stats.kNumMaxTiles; ++i) {
-      if(stats.tile_count[i] > 0) {
-        if(!first_seen)
-          first_seen = true;
-        else
-          data << ", ";
+    for (size_t i = 0; i < tiles_sorted.size(); ++i) {
+      if(!first_seen) first_seen = true;
+      else data << ", ";
 
-        // datart new array with all counts
-        data << "[";
-        for (size_t j = 0; j < stats.max_read_length; ++j) {
-          if (j < stats.kNumBases)
-            data << stats.tile_position_quality[(j << stats.kBitShiftTile) | i];
-          else
-            data << stats.long_tile_position_quality[
-              ((j - stats.kNumBases) << stats.kBitShiftTile) | i];
-
-          if (j < stats.max_read_length - 1)
-            data << ",";
-        }
-        data << "]";
+      // start new array with all counts
+      data << "[";
+      for (size_t j = 0; j < stats.max_read_length; ++j) {
+        data << stats.tile_position_quality[tiles_sorted[i]][j];
+        if (j < stats.max_read_length - 1) data << ",";
       }
+      data << "]";
     }
     data << "]";
     data << ", type : 'heatmap' }";
@@ -3291,5 +3273,3 @@ int main(int argc, const char **argv) {
 
   return EXIT_SUCCESS;
 }
-
-
