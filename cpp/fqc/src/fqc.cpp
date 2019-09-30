@@ -112,7 +112,7 @@ actg_to_2bit(const char &c) {
 }
 
 // log of a power of two, to use in bit shifting for fast index acces
-constexpr size_t
+static constexpr size_t
 log2exact(size_t powerOfTwo) {
   if (powerOfTwo & (powerOfTwo - 1))
     throw std::runtime_error("not a power of two!");
@@ -127,7 +127,7 @@ log2exact(size_t powerOfTwo) {
 }
 
 // Check if a string ends with another, to be use to figure out the file format
-inline bool 
+static inline bool 
 endswith(std::string const & value, std::string const & ending) {
       if (ending.size() > value.size()) return false;
           return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
@@ -1473,6 +1473,8 @@ class StreamReader{
              do_sequence_length,
              do_nogroup;
 
+  bool continue_storing_sequences;
+
   // buffer size to store line 2 of each read statically
   const size_t buffer_size;
 
@@ -1599,6 +1601,8 @@ StreamReader::StreamReader(Config &config,
   buffer = new char[buffer_size + 1];
   buffer[buffer_size] = '\0';
 
+  // duplication init
+  continue_storing_sequences = true;
   // Tile init
   tile_ignore = !do_tile;  //early ignore tile if asked to skip it
   tile_cur = 0;
@@ -1970,23 +1974,27 @@ StreamReader::postprocess_fastq_record(FastqStats &stats) {
 
   if (do_overrepresented || do_duplication) {
     // if reads are >75pb, truncate to 50
-    if(read_pos <= stats.kDupReadMaxSize || do_nogroup)
+    if(do_nogroup || read_pos <= stats.kDupReadMaxSize)
       buffer[read_pos] = '\0';
     else
       buffer[stats.kDupReadTruncateSize] = '\0';
     sequence_to_hash = string(buffer);
 
-    // New sequence found 
+    // New sequence found
     if(stats.sequence_count.count(sequence_to_hash) == 0) {
-      if (stats.num_unique_seen != stats.kDupUniqueCutoff) {
+      if (continue_storing_sequences) {
         stats.sequence_count.insert({{sequence_to_hash, 1}});
         stats.count_at_limit = stats.num_reads;
         ++stats.num_unique_seen;
+        
+        // if we reached the cutoff of 100k, stop storing
+        if (stats.num_unique_seen == stats.kDupUniqueCutoff)
+          continue_storing_sequences = false;
       }
     } else {
       stats.sequence_count[sequence_to_hash]++;
-      if (stats.num_unique_seen < stats.kDupUniqueCutoff)
-        stats.count_at_limit = stats.num_reads;
+      if (continue_storing_sequences)
+        stats.count_at_limit++;
     }
   }
 
