@@ -226,10 +226,28 @@ double get_corrected_count(size_t count_at_limit,
   return num_obs/(1 - p_not_seeing);
 }
 
+// Function to create a smooth gc model similar to FastQC's
+inline void
+smooth_gc_model(array <double, 101> &smooth_gc_count,
+                array <size_t, 101> gc_count) {
+
+  // impute based on adjacent values
+  for (size_t i = 1; i < 100; ++i) {
+    if (gc_count[i] == 0) {
+      gc_count[i] = (gc_count[i-1] + gc_count[i+1])/2.0;
+    }
+  }
+
+  // smooth with a regular sliding window
+  for (size_t i = 1; i < 100; ++i) {
+    smooth_gc_count[i] = (gc_count[i-1] + gc_count[i] + gc_count[i+1])/3.0;
+  }
+}
+
 // Function to calculate the deviation of a histogram with 100 bins from a
 // theoretical normal distribution with same mean and standard deviation
 double
-sum_deviation_from_normal(const array <size_t, 101> &gc_content,
+sum_deviation_from_normal(const array <double, 101> &smooth_gc_count,
                            array <double, 101> &theoretical) {
   double mode = 0.0,  num_reads = 0.0;
 
@@ -237,15 +255,15 @@ sum_deviation_from_normal(const array <size_t, 101> &gc_content,
   // filling up the 0 reads, so the number of reads is not the same as the
   // number of reads in the whole fastq
   for (size_t i = 0; i < 101; ++i) {
-    mode += i*gc_content[i];
-    num_reads += gc_content[i];
+    mode += i*smooth_gc_count[i];
+    num_reads += smooth_gc_count[i];
   }
   mode /= num_reads;
 
   // stadard deviation from the modde
   double stdev = 0.0;
   for (size_t i = 0; i < 101; ++i)
-    stdev += (mode - i) * (mode - i) * gc_content[i];
+    stdev += (mode - i) * (mode - i) * smooth_gc_count[i];
   stdev = sqrt(stdev / (num_reads - 1));
 
   // theoretical sampling from a normal distribution with mean = mode and stdev
@@ -263,7 +281,7 @@ sum_deviation_from_normal(const array <size_t, 101> &gc_content,
     theoretical[i] = theoretical[i] * num_reads / theoretical_sum;
   }
   for (size_t i = 0; i < 101; ++i)
-    ans += fabs(gc_content[i] - theoretical[i]);
+    ans += fabs(smooth_gc_count[i] - theoretical[i]);
 
   // Fractional deviation
   return 100.0 * ans / num_reads;
@@ -672,6 +690,7 @@ struct FastqStats {
   /*********** PER GC VALUE METRICS ****************/
   // histogram of GC fraction in each read from 0 to 100%
   array<size_t, 101> gc_count;
+  array<double, 101> smooth_gc_count;
   array<double, 101> theoretical_gc_count;
 
     /*********** PER READ METRICS ***************/
@@ -1073,13 +1092,11 @@ FastqStats::summarize(Config &config) {
   /******************* PER SEQUENCE GC CONTENT *****************/
   if (config.do_gc_sequence) {
     pass_per_sequence_gc_content = "pass";
-    // fix the zero gcs by averaging around the adjacent values
-    for (size_t i = 1; i < 99; ++i)
-      if (gc_count[i] == 0)
-        gc_count[i] = (gc_count[i+1] + gc_count[i-1])/2;
+    // Here we smooth the gc content using a sliding window:
+    smooth_gc_model(smooth_gc_count, gc_count);
 
     // Calculate pass warn fail statistics
-    double gc_deviation = sum_deviation_from_normal(gc_count,
+    double gc_deviation = sum_deviation_from_normal(smooth_gc_count,
                                                     theoretical_gc_count);
     if (gc_deviation >= config.limits["gc_sequence"]["error"]) {
       pass_per_sequence_gc_content = "fail";
@@ -2213,6 +2230,8 @@ FastqReader(_config, _buffer_size) {
 void
 GzFastqReader::load() {
   fileobj = gzopen(filename.c_str(), "r");
+  if (fileobj == Z_NULL)
+    throw runtime_error("Cannot open gzip file : " + filename);
   cur_char = new char[1];
   ++cur_char;
 }
@@ -2859,7 +2878,7 @@ HTMLFactory::make_sequence_gc_content_data(const FastqStats &stats,
     // Y values: frequency with which they were seen
     data << "], y : [";
     for (size_t i = 0; i < 101; ++i) {
-      data << stats.gc_count[i];
+      data << stats.smooth_gc_count[i];
       if (i < 101)
         data << ", ";
     }
