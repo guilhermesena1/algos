@@ -1,12 +1,6 @@
-ifndef SMITHLAB_CPP
-	$(error Must define SMITHLAB_CPP varialbe)
-endif
-
 PROGS = fqc
 
-INCLUDEDIRS = $(SMITHLAB_CPP)
 LIBS =  -lz -lhts
-INCLUDEARGS = $(addprefix -I, $(INCLUDEDIRS))
 CXX = g++
 CXXFLAGS = -O3 -Wall -Wextra -std=c++14
 
@@ -17,14 +11,13 @@ install: $(PROGS)
 	@install -m 755 $(PROGS) $(SRC_ROOT)/bin
 	rm $(PROGS)
 
-$(PROGS): $(addprefix $(SMITHLAB_CPP)/, smithlab_os.o \
-	smithlab_utils.o OptionParser.o)
+$(PROGS): OptionParser.o smithlab_utils.o
 
 .o: %.cpp %.hpp
-	$(CXX) $(CXXFLAGS) -c -o $@ $< $(INCLUDEARGS)
+	$(CXX) $(CXXFLAGS) -c -o $@ $< 
 
 %: %.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(INCLUDEARGS) $(LIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
 clean:
 	rm -r $(PROGS) *.o *.so *.a *~

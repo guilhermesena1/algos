@@ -43,7 +43,6 @@
 #include <ctime>
 
 #include "smithlab_utils.hpp"
-#include "smithlab_os.hpp"
 #include "OptionParser.hpp"
 
 using std::string;
@@ -77,6 +76,15 @@ using std::ctime;
 /*************************************************************
  ******************** AUX FUNCTIONS **************************
  *************************************************************/
+string
+strip_path(string full_path) {
+  size_t start = full_path.find_last_of('/');
+  if (start == string::npos)
+    start = 0;
+  else
+    ++start;
+  return full_path.substr(start);
+}
 
 static inline void
 log_process(const string &s) {
