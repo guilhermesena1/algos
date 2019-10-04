@@ -2207,7 +2207,7 @@ FastqReader::~FastqReader()  {
 /*******************************************************/
 class GzFastqReader : public FastqReader {
  private:
-  static const size_t kChunkSize = 16384;
+  static const size_t kChunkSize = (1<<20);
   char gzbuf[kChunkSize];
   gzFile fileobj;
 
