@@ -11,24 +11,37 @@ Required C++ libraries
 
 Installation
 ============
-Install with the following command:
+Installation can be done by first compiling and then installing. By default, we
+will look for the lz and lhts libraries in your `LIBRARY_PATH` environment
+variables. If those are installed, compiling can be done by running:
 ```
 make all
+```
+
+Alternatively, if you only wish to run the program on uncompressed files, you
+can disable the zlib and hts dependencies by running:
+```
+make NO_HTS=1 NO_ZLIB=1
+```
+
+In either case, installation can be done by running:
+```
 make install
 ```
+
 This will create a **bin** directory with the **fqc** executable inside, which
-can either be added to your PATH variable or run locally 
+can either be added to your PATH variable or run locally.
 
 Run an example as follows:
 ```
 fqc example.fastq
 ```
 
-This will generate two files : 
+This will generate two files :
  * **example.fastq_qc_summary.txt** is a text file with a summary of the QC
    metrics
  * **example.fast_report.html** is the visual HTML report showing plots of the
-   QC metrics summarized in the text summary. 
+   QC metrics summarized in the text summary.
 
 Copyright and License Information
 =================================

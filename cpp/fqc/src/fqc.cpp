@@ -35,9 +35,14 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <zlib.h>
 
+#ifdef USE_ZLIB
+#include <zlib.h>
+#endif
+
+#ifdef USE_HTS
 #include <htslib/sam.h>
+#endif
 
 #include <chrono>
 #include <ctime>
@@ -2210,6 +2215,8 @@ FastqReader::operator >> (FastqStats &stats) {
 FastqReader::~FastqReader()  {
   munmap(mmap_data, st.st_size);
 }
+
+#ifdef USE_ZLIB
 /*******************************************************/
 /*************** READ FASTQ GZ RCORD *******************/
 /*******************************************************/
@@ -2287,6 +2294,7 @@ GzFastqReader::operator >>(FastqStats &stats) {
   // Returns if file should keep being checked
   return !is_eof();
 }
+#endif
 
 /*******************************************************/
 /*************** READ SAM RECORD ***********************/
@@ -2373,6 +2381,8 @@ SamReader::operator >> (FastqStats &stats) {
 SamReader::~SamReader() {
   munmap(mmap_data, st.st_size);
 }
+
+#ifdef USE_HTS
 /*******************************************************/
 /*************** READ BAM RECORD ***********************/
 /*******************************************************/
@@ -2468,6 +2478,7 @@ BamReader::~BamReader() {
     hts = 0;
   }
 }
+#endif
 
 /*******************************************************/
 /*************** HTML FACTORY **************************/
@@ -3332,21 +3343,30 @@ int main(int argc, const char **argv) {
       SamReader in(config, stats.kNumBases);
       read_stream_into_stats(in,stats,config);
     }
+#ifdef USE_HTS
     else if (config.format == "bam") {
       log_process("reading file as bam format");
       BamReader in (config, stats.kNumBases);
       read_stream_into_stats(in,stats,config);
     }
+#endif
 
+#ifdef USE_ZLIB
     else if (config.compressed) {
       log_process("reading file as gzipped fastq format");
       GzFastqReader in (config, stats.kNumBases);
       read_stream_into_stats(in,stats,config);
     }
-    else {
+#endif
+    else if (endswith(config.filename, "fastq") ||
+             endswith(config.filename, "fq")) {
       log_process("reading file as uncompressed fastq format");
       FastqReader in(config, stats.kNumBases);
       read_stream_into_stats(in, stats, config);
+    }
+    else {
+      throw runtime_error("Cannot recognize file format for file "
+                          + config.filename);
     }
 
     if (!config.quiet)
