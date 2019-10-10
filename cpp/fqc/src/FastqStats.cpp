@@ -861,7 +861,7 @@ FastqStats::write(ostream &os, const Config &config) {
         os << i + 1 << "\t";
         jj = 0;
         for (auto v : config.adapters) {
-          os << 100.0 * kmer_by_base[i][jj];
+          os << kmer_by_base[i][jj];
           ++jj;
 
           if (jj != config.adapters.size()) {
