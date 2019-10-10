@@ -9,8 +9,9 @@
 // log of a power of two, to use in bit shifting for fast index acces
 static constexpr size_t
 log2exact(size_t powerOfTwo) {
-  if (powerOfTwo & (powerOfTwo - 1))
-    throw std::runtime_error("not a power of two!");
+  // throws cannot be used in constexpr at g++ < 7 
+  //if (powerOfTwo & (powerOfTwo - 1))
+  //throw std::runtime_error("not a power of two!");
 
   size_t ans = 0;
   while (powerOfTwo > 0) {
