@@ -1,6 +1,6 @@
 PROGRAMS = fqc
 CXX = g++
-CXXFLAGS = -O3 -Wall -Wextra -std=c++14
+CXXFLAGS = -O3 -Wall -Wextra -std=c++1y
 
 # optional zlib and hts
 LIBS =
