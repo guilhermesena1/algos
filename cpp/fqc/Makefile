@@ -14,6 +14,9 @@ ifndef NO_HTS
 	CXXFLAGS += -DUSE_HTS
 endif
 
+# get path to binary at compile time to look for files
+CXXFLAGS += "-D__MYFILE__=\"`pwd`\""
+
 all: $(PROGRAMS)
 
 install: $(PROGRAMS)
@@ -21,7 +24,12 @@ install: $(PROGRAMS)
 	@install -m 755 $(PROGRAMS) bin
 	rm $(PROGRAMS)
 
-$(PROGRAMS): $(addprefix src/, OptionParser.o smithlab_utils.o)
+$(PROGRAMS): $(addprefix src/, HtmlMaker.o \
+	                             FastqStats.o \
+	                             StreamReader.o \
+	                             Config.o \
+	                             OptionParser.o \
+															 smithlab_utils.o)
 
 %.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o src/$@ $<
