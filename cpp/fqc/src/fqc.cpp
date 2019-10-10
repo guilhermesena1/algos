@@ -34,9 +34,6 @@ using std::to_string;
 
 using std::chrono::system_clock;
 
-/******************************************************
- ********************* MAIN ***************************
- ******************************************************/
 // Function to print progress nicely
 static inline void
 log_process(const std::string &s) {

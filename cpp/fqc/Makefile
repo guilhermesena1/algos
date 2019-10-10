@@ -15,7 +15,7 @@ ifndef NO_HTS
 endif
 
 # get path to binary at compile time to look for files
-CXXFLAGS += "-D__MYFILE__=\"`pwd`\""
+CXXFLAGS += "-DPROGRAM_PATH=\"`pwd`\""
 
 all: $(PROGRAMS)
 

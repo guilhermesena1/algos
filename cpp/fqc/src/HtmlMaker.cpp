@@ -108,7 +108,7 @@ void
 HtmlMaker::put_file_details(const Config &config) {
   // Put filename in filename placeholder
   replace_placeholder_with_data("{{filename}}",
-                                config.filename);
+                                config.filename_stripped);
 
   // Put date on date placeholder
   auto tmp = system_clock::to_time_t(system_clock::now());
