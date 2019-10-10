@@ -38,6 +38,6 @@ $(PROGRAMS): $(addprefix src/, HtmlMaker.o \
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
 clean:
-	rm -r $(PROGRAMS) src/*.o
+	rm -r bin/$(PROGRAMS) src/*.o
 
 .PHONY: clean
