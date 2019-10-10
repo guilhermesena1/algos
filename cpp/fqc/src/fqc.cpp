@@ -245,7 +245,7 @@ int main(int argc, const char **argv) {
       log_process("Summarizing data");
 
     // This function has to be called before writing to output. This is where we
-    // calculate all the summary statistics that will be written to output. 
+    // calculate all the summary statistics that will be written to output.
     stats.summarize(config);
 
     /************************ WRITE TO OUTPUT *****************************/
@@ -267,7 +267,7 @@ int main(int argc, const char **argv) {
 
     /************************ WRITE TO HTML *****************************/
     if (!skip_html) {
-      // Take the html template and populate it with stats data. 
+      // Take the html template and populate it with stats data.
       // Use config to know which parts not to write
       HtmlMaker html_maker(config.html_file);
       html_maker.write(stats, config);

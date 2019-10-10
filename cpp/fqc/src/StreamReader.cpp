@@ -262,6 +262,7 @@ StreamReader::postprocess_sequence_line(FastqStats &stats) {
 
   // Registers GC % in the bin truncated to the nearest integer
   if (do_gc_sequence) {
+    stats.total_gc += cur_gc_count;
     stats.gc_count[round(100 * cur_gc_count / static_cast<double>(read_pos))]++;
   }
 }

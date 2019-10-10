@@ -83,7 +83,7 @@ struct FastqStats {
 
   // mask to get only the first 2*k bits of the sliding window
   size_t kmer_mask;
-
+  size_t total_gc;
   double avg_gc;  // (sum of g bases + c bases) / (num_reads)
   double total_deduplicated_pct;  // number of reads left if deduplicated
 

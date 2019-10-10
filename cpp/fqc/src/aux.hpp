@@ -6,7 +6,6 @@
 #include <cmath>
 #include <iostream>
 #include <algorithm>
-#include <array>
 
 /*************************************************************
  ******************** AUX FUNCTIONS **************************

@@ -67,10 +67,10 @@ Config::Config() {
   min_length = 0;
   format = "";
   threads = 1;
-  contaminants_file = string(__MYFILE__) + "/Configuration/contaminant_list.txt";
-  adapters_file = string(__MYFILE__) + "/Configuration/adapter_list.txt";
-  limits_file = string(__MYFILE__) + "/Configuration/limits.txt";
-  html_file = string(__MYFILE__) + "/Configuration/template.html";
+  contaminants_file = string(PROGRAM_PATH) + "/Configuration/contaminant_list.txt";
+  adapters_file = string(PROGRAM_PATH) + "/Configuration/adapter_list.txt";
+  limits_file = string(PROGRAM_PATH) + "/Configuration/limits.txt";
+  html_file = string(PROGRAM_PATH) + "/Configuration/template.html";
   kmer_size = 7;
   quiet = false;
   tmpdir = ".";

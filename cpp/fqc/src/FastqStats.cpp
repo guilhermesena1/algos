@@ -123,6 +123,7 @@ FastqStats::FastqStats() {
   total_bases = 0;
   num_extra_bases = 0;
   avg_read_length = 0;
+  total_gc = 0;
   avg_gc = 0;
   num_reads = 0;
   num_reads_kmer = 0;
@@ -191,21 +192,9 @@ FastqStats::summarize(Config &config) {
 
   // counts bases G and C in each base position
   avg_gc = 0;
-  for (size_t i = 0; i < max_read_length; ++i) {
-    if (i < kNumBases) {
-      avg_gc += base_count[(i << kBitShiftNucleotide) | 1];  // C
-      avg_gc += base_count[(i << kBitShiftNucleotide) | 3];  // G
-    } else {
-      // C
-      avg_gc += long_base_count[(i - kNumBases) << kBitShiftNucleotide | 1];
-
-      // G
-      avg_gc += long_base_count[(i - kNumBases) << kBitShiftNucleotide | 3];
-    }
-  }
 
   // GC %
-  avg_gc = 100 * avg_gc / total_bases;
+  avg_gc = 100 * total_gc / static_cast<double>(total_bases);
 
   // Poor quality reads
   num_poor = 0;
