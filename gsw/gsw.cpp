@@ -29,7 +29,8 @@ struct Sequence {
   }
 };
 
-istream & operator >> (istream &lhs, Sequence &s) {
+istream & operator
+>> (istream &lhs, Sequence &s) {
   string line;
   if (lhs.peek() != '>')
     throw runtime_error("malformatted fasta file");
@@ -73,11 +74,11 @@ get_alignment_positions(const N &H,
                         const string &query,
                         int    &max_score) {
   max_score = 0;
-  size_t match, in, del, i, j, cur;
+  size_t i,j;
 
   // find largest score
   for (i = 0; i != H.size(); ++i)
-    for (size_t j = 0; j != H[0].size(); ++j)
+    for (j = 0; j != H[0].size(); ++j)
       if (H[i][j] > max_score) {
         max_score = H[i][j];
         target_end = i;
@@ -90,12 +91,11 @@ get_alignment_positions(const N &H,
     if (H[ts][qs] == H[ts-1][qs-1] + s(target[ts-1], query[qs-1])) {
       ts--;
       qs--;
-    } else if (H[ts][qs] == H[ts-1][qs]) {
+    } else if (H[ts][qs] == H[ts-1][qs] - alignment::sg) {
       ts--;
-    } else if (H[ts][qs] == H[ts][qs-1]) {
+    } else if (H[ts][qs] == H[ts][qs-1] - alignment::sg) {
       qs--;
     }
-
     // alignment ends here
     else return;
   }
@@ -108,7 +108,7 @@ template <typename S,
 smith_waterman (const S &target,
                        const T &query,
                        N &H) {
-  int i,j,k;
+  size_t i,j;
   // first row
   for (i = 1; i != target.size() + 1; ++i) {
     for (j = 1; j != query.size() + 1; ++j) {
@@ -128,7 +128,7 @@ read_fasta(istream &is, vector<Sequence> &v) {
   v.push_back(s);
 }
 
-int 
+int
 main(int argc, char **argv) {
   if (argc != 3) {
     cerr << "run: gsw <target.fa> <query.fa>" << endl;
@@ -174,16 +174,23 @@ main(int argc, char **argv) {
               query_start << "\t" <<
               query_end << "\t" <<
               max_score << "\n";
+
       /*
       cout << targets[i].seq << "\n";
       cout << queries[j].seq << "\n";
-      for (size_t i = 0; i < H.size(); ++i) {
-        cout << i << " ";
-        for (size_t j = 0; j < H[0].size(); ++j) {
-          cout << H[i][j] << " ";
+
+      cout << " ";
+      for (size_t k = 0; k < H[0].size(); ++k)
+        cout << queries[j].seq[k] << " ";
+      cout << "\n";
+      for (size_t k = 0; k < H.size(); ++k) {
+        cout << targets[i].seq[k] << " ";
+        for (size_t l = 0; l < H[0].size(); ++l) {
+          cout << H[k][l] << " ";
         }
         cout << "\n";
-      }*/
+      }
+      */
     }
   }
 }
